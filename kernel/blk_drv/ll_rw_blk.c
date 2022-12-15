@@ -72,6 +72,7 @@ static void add_request(struct blk_dev_struct * dev, struct request * req)
 	if (!(tmp = dev->current_request)) {
 		dev->current_request = req;
 		sti();
+		//调用硬盘请求项处理函数 （dev-＞request_fn）（），即 hd.c: do_hd_request（）函数去给硬盘发送读盘命令。
 		(dev->request_fn)();
 		return;
 	}
@@ -139,6 +140,7 @@ repeat:
 	req->waiting = NULL;
 	req->bh = bh;
 	req->next = NULL;
+	// 向请求项队列 中加载该请求项
 	add_request(major+blk_dev,req);
 }
 
@@ -156,12 +158,13 @@ void ll_rw_block(int rw, struct buffer_head * bh)
 
 // 块设备初始化函数，由初始化程序main.c调用
 // 初始化请求数组，将所有请求项置为空闲（dev = -1）,有32项（NR_REQUEST = 32）
+// 进程要想与块设备进行沟通，必须经过主机 内存中的缓冲区。请求项管理结构request[32] 就是操作系统管理缓冲区中的缓冲块与块设备上 逻辑块之间读写关系的数据结构。
 void blk_dev_init(void)
 {
 	int i;
 
 	for (i=0 ; i<NR_REQUEST ; i++) {
-		request[i].dev = -1;
-		request[i].next = NULL;
+		request[i].dev = -1;          //设置为空闲  这个标志将来会被用来判 断对应该请求项的当前设备是否空闲；
+		request[i].next = NULL;       //互不挂接
 	}
 }

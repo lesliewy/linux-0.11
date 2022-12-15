@@ -52,7 +52,7 @@ static inline int send_sig(long sig,struct task_struct * p,int priv)
     // 即是自己），或者当前进程是超级用婚，则向进程p发送信号sig，即在进程p位图中添加该
     // 信号，否则出错退出。其中suser()定义为(current->euid==0)，用于判断是否是超级用户。
 	if (priv || (current->euid==p->euid) || suser())
-		p->signal |= (1<<(sig-1));
+		p->signal |= (1<<(sig-1));        //在进程的信号位图（signal）中找到SIGUSR1这一信号对应的位置，然后将其置1
 	else
 		return -EPERM;
 	return 0;
@@ -75,7 +75,7 @@ static void kill_session(void)
  * XXX need to check permissions needed to send signals to process
  * groups, etc. etc.  kill() permissions semantics are tricky!
  */
-//// 系统调用kill()可用于向任何进程或进程组发送任何信号，而并非只是杀死进程。:-)
+//// **** 系统调用kill()可用于向任何进程或进程组发送任何信号，而并非只是杀死进程。:-)
 // 参数pid是进程号；sig是需要发送的信号。
 // 如果pid > 0, 则信号被发送给进程号是pid的进程。
 // 如果pid = 0, 那么信号就会被发送给当前进程的进程组中的所有进程。
@@ -84,6 +84,9 @@ static void kill_session(void)
 // 如果信号sig=0,则不发送信号，但仍会进行错误检查。如果成功则返回0.
 // 该函数扫描任务数组表，并根据pid的值对满足条件的进程发送指定信号sig。若pid=0,
 // 表明当前进程是进程组组长，因此需要向所有组内进程强制发送信号sig.
+/**
+ * 
+*/
 int sys_kill(int pid,int sig)
 {
 	struct task_struct **p = NR_TASKS + task;
@@ -133,6 +136,18 @@ static void tell_father(int pid)
 //// 程序退出处理函数。
 // 该函数将把当前进程置为TASK_ZOMBIE状态，然后去执行调度函数schedule()，不再返回。
 // 参数code是退出状态码，或称为错误码。
+/**
+ * 1, 进程准备退出
+ *   释放进程代码与数据所占用的物理内存并解除与代码可执行文件的关系，这一点由用户进程自己负责；
+ *   释放进程的管理结构task_struct所占用的物理内存并解除与task[64]的关系，这一点由父进程shell负责；
+ * 
+ * 2, 释放程序所占页面
+ * 
+ * 3, 解除程序与文件有关的内容并给父进程发信号
+ * 
+ * 4, 程序退出后执行进程调度
+ * 
+*/
 int do_exit(long code)
 {
 	int i;
@@ -143,8 +158,8 @@ int do_exit(long code)
     // 的选择符(0x17是进城数据段的选择符)。即在取段基地址时使用该段的描述符所处地址作为
     // 参数，取段长度时使用该段的选择符作为参数。free_page_tables()函数位于mm/memory.c
     // 文件中。
-	free_page_tables(get_base(current->ldt[1]),get_limit(0x0f));
-	free_page_tables(get_base(current->ldt[2]),get_limit(0x17));
+	free_page_tables(get_base(current->ldt[1]),get_limit(0x0f));    //释放代码段所占用的页面
+	free_page_tables(get_base(current->ldt[2]),get_limit(0x17));    //释放数据段所占用的页面
     // 如果当前进程有子进程，就将子进程的father置为1(其父进程改为进程1，即init进程)。
     // 如果该子进程已经处于僵死(ZOMBIE)状态，则向进程1发送子进程中止信号SIGCHLD。
 	for (i=0 ; i<NR_TASKS ; i++)
@@ -207,6 +222,10 @@ int sys_exit(int error_code)
 // 若 options = WNOHANG, 表示如果没有子进程退出或终止就马上返回。
 // 如果返回状态指针 stat_addr不为空，则就将状态信息保存到那里。
 // 参数pid是进程号，*stat_addr是保存状态信息位置的指针，options是waitpid选项。
+/**
+ * 1, 先要对所有的进程进行遍历，先确定哪个进程是进程1的子进程，由于进程1刚刚创建了子进程，即进 程2，于是进程2被选中了
+ * 2, 
+*/
 int sys_waitpid(pid_t pid,unsigned long * stat_addr, int options)
 {
 	int flag, code;             // flag标志用于后面表示所选出的子进程处于就绪或睡眠态。

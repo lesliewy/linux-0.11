@@ -87,9 +87,9 @@ extern long startup_time;       // 内核启动时间（开机时间）（秒）
 // 下面三行分别将指定的线性地址强行转换为给定数据类型的指针，并获取指针所指
 // 的内容。由于内核代码段被映射到从物理地址零开始的地方，因此这些线性地址
 // 正好也是对应的物理地址。这些指定地址处内存值的含义请参见setup程序读取并保存的参数。
-#define EXT_MEM_K (*(unsigned short *)0x90002)
-#define DRIVE_INFO (*(struct drive_info *)0x90080)
-#define ORIG_ROOT_DEV (*(unsigned short *)0x901FC)
+#define EXT_MEM_K (*(unsigned short *)0x90002)      // 从1 MB开始的扩展内存（KB）数
+#define DRIVE_INFO (*(struct drive_info *)0x90080)  //硬盘参数表，参看机器系统数据
+#define ORIG_ROOT_DEV (*(unsigned short *)0x901FC)  //根设备号
 
 /*
  * Yeah, yeah, it's ugly, but I cannot find how to do this correctly
@@ -154,10 +154,15 @@ void main(void)		/* This really IS void, no error here. */
     // 根设备号 ->ROOT_DEV；高速缓存末端地址->buffer_memory_end;
     // 机器内存数->memory_end；主内存开始地址->main_memory_start；
     // 其中ROOT_DEV已在前面包含进的fs.h文件中声明为extern int
- 	ROOT_DEV = ORIG_ROOT_DEV;
+ 	ROOT_DEV = ORIG_ROOT_DEV;       //根据bootsect中写入机器 系统数据的信息设置根设备为软盘
  	drive_info = DRIVE_INFO;        // 复制0x90080处的硬盘参数
+	/** 内存的初步设置 
+	 * 除内核代码和数据所占的内存空间之外，其余物理内存主要分为三部分，分 别是主内存区、缓冲区和虚拟盘。
+	 * memory_end为系统有效内存末端位置。超过这个位置的内存部分，在操作系统中不可见。
+	 * main_memory_start为主内存区起始位 置。buffer_memory_end为缓冲区末端位置。
+	 */
 	memory_end = (1<<20) + (EXT_MEM_K<<10);     // 内存大小=1Mb + 扩展内存(k)*1024 byte
-	memory_end &= 0xfffff000;                   // 忽略不到4kb(1页)的内存数
+	memory_end &= 0xfffff000;                   // 忽略末端不到4kb(1页)的内存数
 	if (memory_end > 16*1024*1024)              // 内存超过16Mb，则按16Mb计
 		memory_end = 16*1024*1024;
 	if (memory_end > 12*1024*1024)              // 如果内存>12Mb,则设置缓冲区末端=4Mb 
@@ -166,8 +171,8 @@ void main(void)		/* This really IS void, no error here. */
 		buffer_memory_end = 2*1024*1024;
 	else
 		buffer_memory_end = 1*1024*1024;        // 否则设置缓冲区末端=1Mb
-	main_memory_start = buffer_memory_end;
-    // 如果在Makefile文件中定义了内存虚拟盘符号RAMDISK,则初始化虚拟盘。此时主内存将减少。
+	main_memory_start = buffer_memory_end;      // 缓冲区之后 就是主内存
+    // 初始化虚拟盘: 如果在Makefile文件中定义了内存虚拟盘符号RAMDISK,则初始化虚拟盘。此时主内存将减少。
 #ifdef RAMDISK
 	main_memory_start += rd_init(main_memory_start, RAMDISK*1024);
 #endif
@@ -184,9 +189,16 @@ void main(void)		/* This really IS void, no error here. */
 	buffer_init(buffer_memory_end);
 	hd_init();                              // 硬盘初始化，kernel/blk_drv/hd.c
 	floppy_init();                          // 软驱初始化，kernel/blk_drv/floppy.c
-	sti();                                  // 所有初始化工作都做完了，开启中断
-    // 下面过程通过在堆栈中设置的参数，利用中断返回指令启动任务0执行。
+	sti();                                  // 所有初始化工作都做完了，开启中断. 系统中所有中断服务程序都已经和 IDT正常挂接。这意味着中断服务体系已经构建 完毕，系统可以在32位保护模式下处理中断，重 要意义之一是可以使用系统调用。
+    // 下面过程通过在堆栈中设置的参数，利用中断返回指令启动任务0执行。 利用iret实现从0特权级翻转到3特权级.
+	// 此 前处在0特权级，严格说还不是真正意义上的进 程。此后计算机中已经有了一个名副其实的、3 特权级的进程——进程0
 	move_to_user_mode();                    // 移到用户模式下执行
+	// 
+	/**
+	 * fork: main.c中_syscall0 -> system_call.s中_sys_call -> 查找sys_call_table(sys.h) 得到 sys_fork -> system_call.s中sys_fork
+	 * -> fork.c中copy_process
+	 * 
+	*/
 	if (!fork()) {		/* we count on this going ok */
 		init();                             // 在新建的子进程(任务1)中执行。
 	}
@@ -199,6 +211,13 @@ void main(void)		/* This really IS void, no error here. */
  */
     // pause系统调用会把任务0转换成可中断等待状态，再执行调度函数。但是调度函数只要发现系统中
     // 没有其他任务可以运行是就会切换到任务0，而不依赖于任务0的状态。
+	/** 
+	 * 虽然已经没有后续代码，但该调用结束后，程序仍然执行的原因是：中断已经打开，进程调度就开始了，而此时可以调度的进程只有进程1所以后续的代码应该从进程1处继续执行……*
+	 * 进程0执行for（；）pause（），最终执行 到schedule（）函数切换到进程1
+	 * pause（）函数的调用是通 过int 0x80中断从3特权级的进程0代码翻转到0 特权级的内核代码执行的
+	 * fork（）函数是用汇编写的，而 sys_pause（）函数是用C语言写的
+	 * sched.c: sys_pause
+	 */
 	for(;;) pause();
 }
 
@@ -217,7 +236,7 @@ static int printf(const char *fmt, ...)
 	return i;
 }
 
-// 读取并执行/etc/rc文件时所使用的命令行参数和环境参数
+// 读取并执行/etc/rc文件时所使用的命令行参数和环境参数,
 static char * argv_rc[] = { "/bin/sh", NULL };      // 调用执行程序时参数字符串数组
 static char * envp_rc[] = { "HOME=/", NULL };       // 调用执行程序时环境字符串数组
 
@@ -237,14 +256,25 @@ void init(void)
     // setup()是一个系统调用。用于读取硬盘参数包括分区表信息并加载虚拟盘(若存在的话)
     // 和安装根文件系统设备。该函数用25行上的宏定义，对应函数是sys_setup()，在块设备
     // 子目录kernel/blk_drv/hd.c中。
+	/** 
+	 * unistd.h: _syscall1 
+	 * -> system_call.s: _system_call、call_sys_call_table
+	 * -> hd.c: sys_setup 
+	 * 硬盘数据读取期间: sched.c sleep_on 等待
+	 * 硬盘数据读完后，产生硬件中断: system_call.s: hd_interrupt 进行中断处理. 
+	 *    a, 如果数据没有读取完，会继续调用schedule(),调度其他进程.
+	 *    b, 
+	 * 
+	 */
 	setup((void *) &drive_info);        // drive_info结构是2个硬盘参数表
     // 下面以读写访问方式打开设备"/dev/tty0",它对应终端控制台。由于这是第一次打开文件
     // 操作，因此产生的文件句柄号(文件描述符)肯定是0。该句柄是UNIX类操作系统默认的
     // 控制台标准输入句柄stdin。这里再把它以读和写的方式别人打开是为了复制产生标准输出(写)
     // 句柄stdout和标准出错输出句柄stderr。函数前面的"(void)"前缀用于表示强制函数无需返回值。
+	/** open（）函数执行后产生软中断，并最终映 射到内核中open.c: sys_open（）函数去执行。*/
 	(void) open("/dev/tty0",O_RDWR,0);
 	(void) dup(0);                      // 复制句柄，产生句柄1号——stdout标准输出设备
-	(void) dup(0);                      // 复制句柄，产生句柄2号——stderr标准出错输出设备
+	(void) dup(0);                      // 复制句柄，产生句柄2号——stderr标准错误输出设备
     // 打印缓冲区块数和总字节数，每块1024字节，以及主内存区空闲内存字节数
 	printf("%d buffers = %d bytes buffer space\n\r",NR_BUFFERS,
 		NR_BUFFERS*BLOCK_SIZE);
@@ -257,17 +287,22 @@ void init(void)
     // 这样shell程序/bin/sh就可以运行rc文件中的命令。由于这里的sh的运行方式是非交互的，
     // 因此在执行完rc命令后就会立刻退出，进程2也随之结束。
     // _exit()退出时出错码1 - 操作未许可；2 - 文件或目录不存在。
+	/** 进程1创建进程2  括号里面为进程2执行的代码 */
 	if (!(pid=fork())) {
-		close(0);
-		if (open("/etc/rc",O_RDONLY,0))
+		// open.c: sys_close()
+		close(0);                           // 关闭标准输入设备文件
+		if (open("/etc/rc",O_RDONLY,0))     // 用rc文件替换该设备文件
 			_exit(1);                       // 如果打开文件失败，则退出(lib/_exit.c)
-		execve("/bin/sh",argv_rc,envp_rc);  // 替换成/bin/sh程序并执行
+		// system_call.s: sys_execve
+		execve("/bin/sh",argv_rc,envp_rc);  // 加载shell程序，其中/bin/sh为shell文件路径，argv_rc和 envp_rc分别是参数及环境变量
 		_exit(2);                           // 若execve()执行失败则退出。
 	}
     // 下面还是父进程(1)执行语句。wait()等待子进程停止或终止，返回值应是子进程的进程号(pid).
     // 这三句的作用是父进程等待子进程的结束。&i是存放返回状态信息的位置。如果wait()返回值
     // 不等于子进程号，则继续等待。
+	/** 进程1等待子进程退出，最终会 切换到进程2执行 */
 	if (pid>0)
+		// exit.c: sys_waitpid()
 		while (pid != wait(&i))
 			/* nothing */;
     // 如果执行到这里，说明刚创建的子进程的执行已停止或终止了。下面循环中首先再创建

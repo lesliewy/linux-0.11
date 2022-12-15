@@ -32,6 +32,9 @@ start:
 
 ! ok, the read went well so we get current cursor position and save it for
 ! posterity.
+! 提取机器系统数据, 被加载到内存的0x90000 ～0x901FC位置。
+! 其中包括光标位置、显示页面等数据，并分别从中断向量0x41和0x46向量值所指的内存地址处获取硬盘参数表1、硬盘参数表2，把它们存放在0x9000
+! BIOS提取的机器系统数据将覆盖 bootsect程序所在部分区域。
 
 	mov	ax,#INITSEG	! this is done in bootsect already, but...
 	mov	ds,ax
@@ -104,10 +107,15 @@ no_disk1:
 is_disk1:
 
 ! now we want to move to protected mode ...
+! 关中断并将system移动到内存地址起始位置0x00000.
+! 这意味着，程序在接下来的执行过程中，无论是否发生中断，系统都不再对此中断进行响应，直到main函数中能够适应保护模式的中断服务体系被重建完毕才会打开中断，
+! 而那时候响应中断的服务程序将不再是BIOS提供的中断服务程序，取而代之的是由系统自身提供的中断服务程序。
 
-	cli			! no interrupts allowed !
+	cli			! no interrupts allowed !  关中断
 
 ! first we move the system to it's rightful place
+! 0x00000这个位置 原来存放着由BIOS建立的中断向量表及BIOS数据区。直到新的中断服务体系构建完毕之前，操作系统不再具备响应并处理中断的能力。
+! 即废除了BIOS的16位的中断机制，建立Linux操作系统的32位中断机制.
 
 	mov	ax,#0x0000
 	cld			! 'direction'=0, movs moves forward
@@ -125,6 +133,9 @@ do_move:
 	jmp	do_move
 
 ! then we load the segment descriptors
+! 对中断描述符表寄存器（IDTR）和全局描述符表寄存器 GDTR）进行初始化设置。
+! 32位的中断机制和16位的中断机制，在原理上有比较大的差别。最明显的是16位的中断机制用的是中断向量表，中断向量表的起始位置在0x00000处，这个位置是固定的；
+! 32位的中断机制用的是中断描述符表（IDT），位置是不固定的, 由IDTR来锁定其位置.
 
 end_move:
 	mov	ax,#SETUPSEG	! right, forgot this at first. didn't work :-)
@@ -133,6 +144,9 @@ end_move:
 	lgdt	gdt_48		! load gdt with whatever appropriate
 
 ! that was painless, now we enable A20
+! 打开A20，意味着CPU可以进行32位寻址，最大寻址空间为4GB。
+! 实模式下CPU寻址范围为0～0xFFFFF，共1 MB寻址空间，需要0～19号共20根地址线。
+! 进入保护模式后，将使用32位寻址模式，即采用32 根地址线进行寻址，第21根（A20）至第32根地址线的选通控制将意味着寻址模式的切换。
 
 	call	empty_8042
 	mov	al,#0xD1		! command write
@@ -149,6 +163,8 @@ end_move:
 ! rectify it afterwards. Thus the bios puts interrupts at 0x08-0x0f,
 ! which is used for the internal hardware interrupts as well. We just
 ! have to reprogram the 8259's, and it isn't fun.
+! 对可编程中断控制器8259A进行重新编程. 8259A是专门为了对8085A和8086/8088 进行中断控制而设计的芯片，是可以用程序控制 的中断控制器。
+！ int 0x00～int 0x1F被 Intel保留作为内部（不可屏蔽）中断和异常中断。如果不对8259A进行重新编程，int 0x00～ int 0x1F中断将被覆盖。
 
 	mov	al,#0x11		! initialization sequence
 	out	#0x20,al		! send it to 8259A-1
@@ -186,6 +202,7 @@ end_move:
 ! things as simple as possible, we do no register set-up or anything,
 ! we let the gnu-compiled 32-bit programs do that. We just jump to
 ! absolute address 0x00000, in 32-bit protected mode.
+！ 将CR0寄存器第0位 （PE）置1，即设定处理器工作方式为保护模式。 CPU工作方式转变为保护模式，一个重要的 特征就是要根据GDT决定后续执行哪里的程序。
 	mov	ax,#0x0001	! protected mode (PE) bit
 	lmsw	ax		! This is it!
 	jmpi	0,8		! jmp offset 0 of segment 8 (cs)

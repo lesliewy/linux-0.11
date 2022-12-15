@@ -12,7 +12,8 @@
 #include <linux/mm.h>
 #include <asm/system.h>
 
-// 内存中i节点表(NR_INODE=32)
+// 内存中i节点表(NR_INODE=32)  
+/** （inode_table[32]是操作系统用来控制同时打开不同文件的最大数*/
 struct m_inode inode_table[NR_INODE]={{0,},};
 
 // 读指定i节点号的i节点信息
@@ -362,6 +363,9 @@ struct m_inode * get_pipe_inode(void)
 // 首先在位于高速缓冲区中的i节点表中搜寻，若找到指定节点号的i节点则在经过一些判断
 // 处理后返回该i节点指针。否则从设备dev上读取指定i节点号的i节点信息放入i节点表中，
 // 并返回该i节点指针。
+/**
+ * 一个文件只能有一个i节 点，同一个文件又可能被多个进程同时引用，现在需要获取的文件i节点有可能已经被其他进程载 入，如果重复载入i节点，不仅容易引起混乱，而 且浪费时间.
+*/
 struct m_inode * iget(int dev,int nr)
 {
 	struct m_inode * inode, * empty;

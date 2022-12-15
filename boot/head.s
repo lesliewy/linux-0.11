@@ -7,9 +7,24 @@
 /*
  *  head.s contains the 32-bit startup code.
  *
+ * 加载操作系统的时候，计算机刚刚加电，只有BIOS程序在运行，而且此时计算机处在16位实模式状态，通过BIOS程序自身的代码形成的16位的中断向量表及相关的16位的中断服务程序，
+ * 将操作系统在软盘上的第一扇区（512字节）的代码加载到内存，BIOS能主动操作的内容也就到此为止了。准确地说，这是一个约定。对于第一扇区代码的加载，不论 什么操作系统都是一样的；
+ * 从第二扇区开始，就要由第一扇区中的代码来完成后续的代码加载工作。
+ *
+ * 当加载工作完成后，好像仍然没有立即执行main函数，而是打开A20，打开pe、pg，建立 IDT、GDT……然后才开始执行main函数，这是什么道理？ 原因是，Linux 0.11是一个32位的实时多任务的现代操作系统，
+ * main函数肯定要执行的是32位的代码。编译操作系统代码时，是有16位和32位不同的编译选项的。如果选了16位，C语言编译出来的代码是16位模式的，结果可能是一个int 型变量，只有2字节，而不是32位的4字节……
+ * 这不是Linux 0.11想要的。Linux 0.11要的是32位的编译结果。只有这样才能成为32位的操作系统代码。这样的代码才能用到32位总线（打开A20 后的总线），才能用到保护模式和分页，
+ * 才能成 为32位的实时多任务的现代操作系统。
+ 
+ * 开机时的16位实模式与main函数执行需要的 32位保护模式之间有很大的差距，这个差距谁来填补？head.s做的就是这项工作。这期间，head程序打开A20，打开pe、pg，废弃旧的、16位的中断响应机制，
+ * 建立新的32位的IDT…… 这些工作都做完了，计算机已经处在32位的保护 模式状态了，调用32位main函数的一切条件已经准备完毕，这时顺理成章地调用main函数。后面 的操作就可以用32位编译的main函数完成。
+ 
  * NOTE!!! Startup happens at absolute address 0x00000000, which is also where
  * the page directory will exist. The startup code will be overwritten by
  * the page directory.
+ * 标号_pg_dir标识内核分页机制完成后的内核 起始位置，也就是物理内存的起始位置 0x000000。
+ * 在实模式下，CS本身就是代码段基址。在保护模式下，CS 本身不是代码段基址，而是代码段选择符。
+ * 要将DS、ES、FS和GS等其他 寄存器从实模式转变到保护模式
  */
 .text
 .globl idt,gdt,pg_dir,tmp_floppy_area
@@ -21,9 +36,9 @@ startup_32:
 	mov %ax,%es
 	mov %ax,%fs
 	mov %ax,%gs
-	lss stack_start,%esp
+	lss stack_start,%esp    # 之前是设置SP， 这时候是设置ESP，多 加了一个字母E，这是为适应保护模式而做的调 整。
 	call setup_idt
-	call setup_gdt
+	call setup_gdt          # 重新创建GDT
 	movl $0x10,%eax		# reload all the segment registers
 	mov %ax,%ds		# after changing gdt. CS was already
 	mov %ax,%es		# reloaded in 'setup_gdt'
@@ -134,13 +149,17 @@ pg3:
 tmp_floppy_area:
 	.fill 1024,1,0
 
+/*
+ * 将main函数入口地址和L6标号压栈： main函数在正常情况下是不应该退出的。如果main函数异常退出，就会返回这里的标号L6处继续执行，此时，还可以做一些系统调用
+ *
+ */
 after_page_tables:
 	pushl $0		# These are the parameters to main :-)
 	pushl $0
 	pushl $0
 	pushl $L6		# return address for main, if it decides to.
 	pushl $main
-	jmp setup_paging
+	jmp setup_paging  # 开始创建分页机制
 L6:
 	jmp L6			# main should never return here, but
 				# just in case, we know what happens.
@@ -196,9 +215,26 @@ ignore_int:
  * some kind of marker at them (search for "16Mb"), but I
  * won't guarantee that's all :-( )
  */
+ /** 
+ * 这里是内核给自己分页：这4个页表都是内核专属的页表，将来每个用 户进程都会有它们专属的页表.
+ * 内核的线性地址等于物理地址。这样做的目的是，内核可以对内存中的所有进程的内存区域任意访问。
+ *
+ * 页目录表只有一个，一个页目录表可以掌控1024个页表，一个页 表掌控1024个页面，一个页面4 KB，这样一个 页目录表就可以掌控1024×1024×4 KB=4 GB 大小的内存空间。
+ *
+ * 将一个页目录表和4个页表放在物理内存的起始位置，把页目录表和4个页表全部清零，然后把P位设置为1。
+ * 每个页目录项 和页表项的最后3位，标志着其所管理的页面的 属性（一个页表本身也占用一个页面），它们分 别是U/S、R/W和P。
+ * U/S: 如果U/S位设置为0，表示段 特权级为3的程序不可以访问该页面，其他特权 级都可以；如果被设置为1，表示包括段特权级 为3在内的所有程序都可以访问该页面。
+ * 它的作用就是看死用户进程，阻止内核才能访问的页面 被用户进程使用。
+ * R/W: 读写锁。 如果它被设置为0，说明 页面只能读不能写；如果设置为1，说明可读可 写.
+ * P: 一个页目录项或一个页表项，如果和一个页 面建立了映射关系，P标志就设置为1；如果没建 立映射关系，该标志就是0。进程执行时，线性 地址值都会被MMU解析。
+ * 	如果解析出某个表项的P位为0，说明该表项没有对应页面，就会产生缺页中断。
+ * 	页表和页面的关系解除后，页表项就要清零。页目录项和页表解除关系后，页目录项也要清零，这样就等于把对应的页表项、页目录项的 P清零了。
+ * 
+ * 
+ */
 .align 2
 setup_paging:
-	movl $1024*5,%ecx		/* 5 pages - pg_dir+4 page tables */
+	movl $1024*5,%ecx		/* 5 pages - pg_dir+4 page tables  页目录表也是一页.*/
 	xorl %eax,%eax
 	xorl %edi,%edi			/* pg_dir is at 0x000 */
 	cld;rep;stosl
@@ -207,17 +243,22 @@ setup_paging:
 	movl $pg2+7,pg_dir+8		/*  --------- " " --------- */
 	movl $pg3+7,pg_dir+12		/*  --------- " " --------- */
 	movl $pg3+4092,%edi
-	movl $0xfff007,%eax		/*  16Mb - 4096 + 7 (r/w user,p) */
+	movl $0xfff007,%eax		/*  16Mb - 4096 + 7 (r/w user,p)   7是111, P*/
 	std
 1:	stosl			/* fill pages backwards - more efficient :-) */
 	subl $0x1000,%eax
 	jge 1b
 	xorl %eax,%eax		/* pg_dir is at 0x0000 */
-	movl %eax,%cr3		/* cr3 - page directory start */
+	movl %eax,%cr3		/* cr3 - page directory start. ，CR3中存储着页目录表的基址，这样MMU解析线性地址时，先找CR3中的信息 */
 	movl %cr0,%eax
 	orl $0x80000000,%eax
-	movl %eax,%cr0		/* set paging (PG) bit */
-	ret			/* this also flushes prefetch-queue */
+	/**
+	 * 设置CR0，打开PG. 
+	 * CPU的硬件默认，在保护模式下，如果没有打开PG，线性地址恒等映射到物理地址；如果打开了PG，则线性地址需要通过MMU进行解析，以页目录表、页表、页面的三级映射模式映射到物理地址。
+	 * 在此之前, PE(保护模式)已打开，CR3(页目录基地址)已设置.
+	 */
+	movl %eax,%cr0		/* set paging (PG) bit. */
+	ret			/* this also flushes prefetch-queue  执行ret，将main函数入口地址弹出给EIP*/
 
 .align 2
 .word 0

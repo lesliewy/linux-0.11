@@ -127,6 +127,10 @@ static int match(int len,const char * name,struct dir_entry * de)
 // 作用，请参见seched.c中的注释。
 // 返回：成功则函数高速缓冲区指针，并在*res_dir处返回的目录项结构指针。失败则
 // 返回空指针NULL。
+/**
+ * 先通过目录 文件i节点，确定目录文件中有多少目录项，之后 从目录文件对应的第一个逻辑块开始，不断将该 文件的逻辑块从外设读入缓冲区，
+ * 并从中查找指 定目录项，直到找到指定的目录项为止。
+*/
 static struct buffer_head * find_entry(struct m_inode ** dir,
 	const char * name, int namelen, struct dir_entry ** res_dir)
 {
@@ -505,6 +509,17 @@ struct m_inode * namei(const char * pathname)
 // 权限)、S_IRWXG(组成员具有读、写和执行权限)等等。对于新创建的文件，这些属性只应用于
 // 将来对文件的访问，创建了只读文件的打开调用也将返回一个可读写的文件句柄。
 // 返回：成功返回0，否则返回出错码；res_inode - 返回对应文件路径名的i节点指针。
+/**
+ * 寻找i节点: 通过i节点找到目录文件→通过目录文件找到目录项→通过目录项找到 目录文件i节点号→通过目录文件找到目录项→通过目录项找到 目录文件i节点号→....
+ * 通过不断分析路径名来实现的。 
+ * 第一阶段是调用dir_namei（）函 数，获取枝梢i节点，即/dev/tty0路径中dev目录 文件的i节点；
+ * 第二阶段是调用find_entry（）函 数，通过此i节点，找到dev目录文件中tty0这一 目录项，
+ * 再通过该目录项找到tty0文件的i节点。
+ * 
+ * 新建文件:
+ *  1, 查找文件find_entry()找不到，返回的bh为null
+ *  2, 新建i节点，新建目录项.
+*/
 int open_namei(const char * pathname, int flag, int mode,
 	struct m_inode ** res_inode)
 {
@@ -544,11 +559,11 @@ int open_namei(const char * pathname, int flag, int mode,
     // 返回出错号退出。
 	bh = find_entry(&dir,basename,namelen,&de);
 	if (!bh) {
-		if (!(flag & O_CREAT)) {
+		if (!(flag & O_CREAT)) {           //确定用户确实是要新建一个文件
 			iput(dir);
 			return -ENOENT;
 		}
-		if (!permission(dir,MAY_WRITE)) {
+		if (!permission(dir,MAY_WRITE)) {  //确定用户是否在 user2目录文件中有写入权限
 			iput(dir);
 			return -EACCES;
 		}
@@ -556,15 +571,15 @@ int open_namei(const char * pathname, int flag, int mode,
         // 新的i节点给路径名上指定的文件使用。若失败则放回目录的i节点，并返回没有空间出错码。
         // 否则使用该新i节点，对其进行初始设置：置节点的用户id；对应节点访问模式；置已修改
         // 标志。然后并在指定目录dir中添加一个新目录项。
-		inode = new_inode(dir->i_dev);
+		inode = new_inode(dir->i_dev);  //新建i节点
 		if (!inode) {
 			iput(dir);
 			return -ENOSPC;
 		}
 		inode->i_uid = current->euid;
-		inode->i_mode = mode;
+		inode->i_mode = mode;           //设置i节点访问模式
 		inode->i_dirt = 1;
-		bh = add_entry(dir,basename,namelen,&de);
+		bh = add_entry(dir,basename,namelen,&de);  //新建 目录项
         // 如果返回的应该含有新目录项的高速缓冲区指针为NULL，则表示添加目录项操作失败。于是
         // 将该新i节点的引用计数减1，放回该i节点与目录的i节点并返回出错码退出。否则说明添加
         // 目录项操作成功。于是我们来设置该新目录的一些初始值：置i节点号为新申请的i节点的号
@@ -576,7 +591,7 @@ int open_namei(const char * pathname, int flag, int mode,
 			iput(dir);
 			return -ENOSPC;
 		}
-		de->inode = inode->i_num;
+		de->inode = inode->i_num;     //在目录项中添加i节点号
 		bh->b_dirt = 1;
 		brelse(bh);
 		iput(dir);
@@ -976,6 +991,10 @@ int sys_rmdir(const char * name)
 // 删除，并释放所占用的设备空间。
 // 参数：name - 文件名（路径名）
 // 返回：成功则返回0，否则返回出错号。
+/**
+ * 1, 对文件的删除条件进行检查
+ * 2, 进行具体的删除工作: 逻辑块位图清空； i节点位图清空； 目录项设置为空闲；
+*/
 int sys_unlink(const char * name)
 {
 	const char * basename;
@@ -995,7 +1014,7 @@ int sys_unlink(const char * name)
 		iput(dir);
 		return -ENOENT;
 	}
-	if (!permission(dir,MAY_WRITE)) {
+	if (!permission(dir,MAY_WRITE)) {   // 需要有dirname目录的写入权限。
 		iput(dir);
 		return -EPERM;
 	}
@@ -1005,12 +1024,12 @@ int sys_unlink(const char * name)
     // 应路径名上最后目录名的目录项不存在，则释放包含该目录项的高速缓冲区，放回目录的
     // i节点，返回文件已经存在出错码，并退出。如果取自目录项的i节点出错，则放回目录的
     // i节点，并释放含有目录项的高速缓冲区，返回出错号。
-	bh = find_entry(&dir,basename,namelen,&de);
+	bh = find_entry(&dir,basename,namelen,&de);             //获得目标文件的目录项
 	if (!bh) {
 		iput(dir);
 		return -ENOENT;
 	}
-	if (!(inode = iget(dir->i_dev, de->inode))) {
+	if (!(inode = iget(dir->i_dev, de->inode))) {           //获得要 删除文件的i节点
 		iput(dir);
 		brelse(bh);
 		return -ENOENT;

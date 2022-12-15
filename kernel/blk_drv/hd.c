@@ -68,6 +68,12 @@ extern void hd_interrupt(void);
 extern void rd_load(void);
 
 /* This may be used only once, enforced by 'static int callable' */
+/**
+ * 为安装硬盘文件系统做准备：
+ * 1）根据机器系统数据设置硬盘参数； 
+ * 2）读取硬盘引导块； 
+ * 3）从引导块中获取信息。
+*/
 int sys_setup(void * BIOS)
 {
 	static int callable = 1;
@@ -76,10 +82,12 @@ int sys_setup(void * BIOS)
 	struct partition *p;
 	struct buffer_head * bh;
 
+	//控制只调用一次
 	if (!callable)
 		return -1;
 	callable = 0;
 #ifndef HD_TYPE
+	// 根据机器系统数据中的drive_info，如硬盘 的柱面数、磁头数、扇区数，设置内核的 hd_info
 	for (drive=0 ; drive<2 ; drive++) {
 		hd_info[drive].cyl = *(unsigned short *) BIOS;
 		hd_info[drive].head = *(unsigned char *) (2+BIOS);
@@ -89,11 +97,13 @@ int sys_setup(void * BIOS)
 		hd_info[drive].sect = *(unsigned char *) (14+BIOS);
 		BIOS += 16;
 	}
+	//判断有几个硬盘
 	if (hd_info[1].cyl)
 		NR_HD=2;
 	else
 		NR_HD=1;
 #endif
+	//一个物理硬盘最多可以分4个逻辑盘，0是物理盘，1～4是逻辑 盘，共5个，第1个物理盘是0*5，第2个物理盘是1*5
 	for (i=0 ; i<NR_HD ; i++) {
 		hd[i*5].start_sect = 0;
 		hd[i*5].nr_sects = hd_info[i].head*
@@ -133,7 +143,9 @@ int sys_setup(void * BIOS)
 		hd[i*5].start_sect = 0;
 		hd[i*5].nr_sects = 0;
 	}
+	//第1个物理盘设备号是0x300，第2个是0x305，读每个物理硬 盘的0号块，即引导块，有分区信息
 	for (drive=0 ; drive<NR_HD ; drive++) {
+		// buffer.c: bread
 		if (!(bh = bread(0x300 + drive*5,0))) {
 			printk("Unable to read partition table of drive %d\n\r",
 				drive);
@@ -154,6 +166,7 @@ int sys_setup(void * BIOS)
 	if (NR_HD)
 		printk("Partition table%s ok.\n\r",(NR_HD>1)?"s":"");
 	rd_load();
+	/** 在 根设备虚拟盘上加载根文件系统 */
 	mount_root();
 	return (0);
 }
@@ -187,7 +200,7 @@ static void hd_out(unsigned int drive,unsigned int nsect,unsigned int sect,
 		panic("Trying to write bad sector");
 	if (!controller_ready())
 		panic("HD controller not ready");
-	do_hd = intr_addr;
+	do_hd = intr_addr;  //根据调用的实参决定是read_intr还是 write_intr，现在是read_intr outb _p， 这里面的 do_hd是system_call.s中_hd_interrupt下面 xchgl_do_hd，%edx这一行所描述的内容
 	outb_p(hd_info[drive].ctl,HD_CMD);
 	port=HD_DATA;
 	outb_p(hd_info[drive].wpcom>>2,++port);
@@ -247,6 +260,9 @@ static void bad_rw_intr(void)
 		reset = 1;
 }
 
+/**
+ * 中断处理
+*/
 static void read_intr(void)
 {
 	if (win_result()) {
@@ -258,10 +274,12 @@ static void read_intr(void)
 	CURRENT->errors = 0;
 	CURRENT->buffer += 512;
 	CURRENT->sector++;
+	// 数据没有读完的情况下，内核将再次把 read_intr（）绑定在硬盘中断服务程序上，以待 下次使用，之后中断服务程序返回。
 	if (--CURRENT->nr_sectors) {
 		do_hd = &read_intr;
 		return;
 	}
+	// 数据都读取完.
 	end_request(1);
 	do_hd_request();
 }
@@ -322,10 +340,11 @@ void do_hd_request(void)
 	if (recalibrate) {
 		recalibrate = 0;
 		hd_out(dev,hd_info[CURRENT_DEV].sect,0,0,0,
-			WIN_RESTORE,&recal_intr);
+			WIN_RESTORE,&recal_intr);   //将向硬盘发送 WIN_RESTORE命令，将磁头移动到0柱面，以便从硬盘上读取数据
 		return;
 	}	
 	if (CURRENT->cmd == WRITE) {
+		// 写盘. write_intr()是写盘的中断服务程序。
 		hd_out(dev,nsect,sec,head,cyl,WIN_WRITE,&write_intr);
 		for(i=0 ; i<3000 && !(r=inb_p(HD_STATUS)&DRQ_STAT) ; i++)
 			/* nothing */ ;
@@ -335,6 +354,7 @@ void do_hd_request(void)
 		}
 		port_write(HD_DATA,CURRENT->buffer,256);
 	} else if (CURRENT->cmd == READ) {
+		// 读盘. read_intr（）是读盘操作对应 的中断服务程序
 		hd_out(dev,nsect,sec,head,cyl,WIN_READ,&read_intr);
 	} else
 		panic("unknown hd-command");

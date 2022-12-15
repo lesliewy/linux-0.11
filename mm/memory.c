@@ -19,6 +19,10 @@
  *
  * Also corrected some "invalidate()"s - I wasn't doing enough of them.
  */
+/**
+ * Linux 0.11三级映射: 页目录表(10), 页表(10), 页(12).
+ * 
+*/
 
 #include <signal.h>
 
@@ -54,7 +58,7 @@ __asm__("movl %%eax,%%cr3"::"a" (0))
 #define LOW_MEM 0x100000
 // 分页内存15 MB，主内存区最多15M.
 #define PAGING_MEMORY (15*1024*1024)
-// 分页后的物理内存页面数（3840）
+// 分页后的物理内存页面数（3840）  4KB/页
 #define PAGING_PAGES (PAGING_MEMORY>>12)
 // 指定地址映射为页号
 #define MAP_NR(addr) (((addr)-LOW_MEM)>>12)
@@ -82,7 +86,7 @@ static unsigned char mem_map [ PAGING_PAGES ] = {0,};
  * Get physical address of first (actually last :-) free page, and mark it
  * used. If no free pages left, return 0.
  */
-//// 在主内存区中取空闲屋里页面。如果已经没有可用物理内存页面，则返回0.
+//// 在主内存区中取空闲物理页面。如果已经没有可用物理内存页面，则返回0.
 // 输入：%1(ax=0) - 0; %2(LOW_MEM)内存字节位图管理的其实位置；%3(cx=PAGING_PAGES);
 // %4(edi=mem_map+PAGING_PAGES-1).
 // 输出：返回%0(ax=物理内存页面起始地址)。
@@ -92,6 +96,10 @@ static unsigned char mem_map [ PAGING_PAGES ] = {0,};
 // 并没有映射到某个进程的地址空间中去。后面的put_page()函数即用于把指定页面映射
 // 到某个进程地址空间中。当然对于内核使用本函数并不需要再使用put_page()进行映射，
 // 因为内核代码和数据空间（16MB）已经对等地映射到物理地址空间。
+/**
+ * 在内核中执行，获得的用于task_struct和内核栈的页面只可能在 内核的线性地址空间。
+ * 从高地址端向低地址端遍历所有页面的，只要发现空 闲页面，就申请，直到申请不到空闲页面为止
+*/
 unsigned long get_free_page(void)
 {
 register unsigned long __res asm("ax");
@@ -109,7 +117,7 @@ __asm__("std ; repne ; scasb\n\t"   // 置方向位，al(0)与对应每个页面
 	"1:"
 	:"=a" (__res)
 	:"0" (0),"i" (LOW_MEM),"c" (PAGING_PAGES),
-	"D" (mem_map+PAGING_PAGES-1)
+	"D" (mem_map+PAGING_PAGES-1)    //在mem_map[]的管 理范围内查找空闲页
 	);
 return __res;           // 返回空闲物理页面地址(若无空闲页面则返回0).
 }
@@ -220,6 +228,9 @@ int free_page_tables(unsigned long from,unsigned long size)
 // 表，原物理内存区将被共享。此后两个进程（父进程和其子进程）将共享内存区，直到
 // 有一个进程执行谢操作时，内核才会为写操作进程分配新的内存页(写时复制机制)。
 // 参数from、to是线性地址，size是需要复制（共享）的内存长度，单位是byte.
+/**
+ * 复制页表和设置页目录项
+*/
 int copy_page_tables(unsigned long from,unsigned long to,long size)
 {
 	unsigned long * from_page_table;
@@ -252,6 +263,7 @@ int copy_page_tables(unsigned long from,unsigned long to,long size)
         // from_page_table。为了保存目的目录项对应的页表，需要在住内存区中申请1
         // 页空闲内存页。如果取空闲页面函数get_free_page()返回0，则说明没有申请
         // 到空闲内存页面，可能是内存不够。于是返回-1值退出。
+		// *from_dir是页目录项中的地址，0xfffff000＆是将低12位清 零，高20位是页表的地址
 		from_page_table = (unsigned long *) (0xfffff000 & *from_dir);
 		if (!(to_page_table = (unsigned long *) get_free_page()))
 			return -1;	/* Out of memory, see freeing */
@@ -263,6 +275,7 @@ int copy_page_tables(unsigned long from,unsigned long to,long size)
         // 核空间，则仅需复制头160页对应的页表项(nr=160),对应于开始640KB物理内存
         // 否则需要复制一个页表中的所有1024个页表项(nr=1024)，可映射4MB物理内存。
 		*to_dir = ((unsigned long) to_page_table) | 7;
+		//0xA0即160，复制页表的 项数，
 		nr = (from==0)?0xA0:1024;
         // 此时对于当前页表，开始循环复制指定的nr个内存页面表项。先取出源页表的
         // 内容，如果当前源页表没有使用，则不用复制该表项，继续处理下一项。否则
@@ -358,6 +371,12 @@ unsigned long put_page(unsigned long page,unsigned long address)
 // 申请一新页面并复制被写页面内容，以供写进程单独使用。共享被取消。本函数供下面
 // do_wp_page()调用。
 // 输入参数为页表项指针，是物理地址。[up_wp_page -- Un-Write Protect Page]
+/**
+ * 开始时子进程和父进程共享页面，都是只读的，当子进程需要压栈时，就引发“页写保护”中断，该中断的处理程序就是这。
+ * 1, 先要在主内存中申请一个空闲页面，以便备份刚才压栈的位置所在页面的全部数据，然后将原页面 的引用计数减1。
+ * 2, 将子进程的页表指向新申请的页面，并将其使用的属 性从“只读”改变为“可读可写”
+ * 3, 复制原页面内容到进程A新申请的页面
+*/
 void un_wp_page(unsigned long * table_entry)
 {
 	unsigned long old_page,new_page;
@@ -382,10 +401,10 @@ void un_wp_page(unsigned long * table_entry)
 	if (!(new_page=get_free_page()))
 		oom();
 	if (old_page >= LOW_MEM)
-		mem_map[MAP_NR(old_page)]--;
-	*table_entry = new_page | 7;
+		mem_map[MAP_NR(old_page)]--;     //页面引用计数递减1
+	*table_entry = new_page | 7;         //7的二进制形式为111，标志着 新页面可读可写了
 	invalidate();
-	copy_page(old_page,new_page);
+	copy_page(old_page,new_page);        //这里把原页面的数据复制到新页面，供进程使用
 }	
 
 /*
@@ -465,7 +484,7 @@ void get_empty_page(unsigned long address)
 	unsigned long tmp;
 
     // 如果不能取得有一空闲页面，或者不能将所取页面放置到指定地址处，则显示内存不够信息。
-	if (!(tmp=get_free_page()) || !put_page(tmp,address)) {
+	if (!(tmp=get_free_page()) || !put_page(tmp,address)) {      //申请页面及映射到进程的线性地址空间内
 		free_page(tmp);		/* 0 is ok - ignored */
 		oom();
 	}
@@ -622,6 +641,27 @@ static int share_page(unsigned long address)
 // 成。该函数首先尝试与已加载的相同文件进行页面共享，或者只是由于进程动态申请内
 // 存页面而只需映射一页物理内存即可。若共享操作不成功，那么只能从相应文件中读入
 // 所缺的数据页面到指定线性地址处。
+/**
+ * 加载: 
+ * 1, 检查
+ *  用户程序是否已经把程序加载进来 了，或者产生缺页中断的线性地址值是否已经超 出了程序代码的末端。
+ *  用户程序是否有可能与某个现有的进程共享代码，比如某个其他进程已经把用户程序加载了的情况。
+ * 
+ * 2, 为用户程序申请一个内存页面
+ * 
+ * 3, 将用户程序加载到新分配的页面中
+ *  将程序从硬盘加载到这个新分配的页面中，一次加载4 KB的内容。
+ *  由于这个页面早已经映射到了内核的线性地址空间内，所以新加载进来的内容，只要内核有需要，就可以进行任意改动。
+ * 
+ * 4, 将分配给用户程序的物理内存地址与用户进程的线性地址空间对应
+ *    映射完毕后，用户进程才能执行到加载的程序。
+ * 
+ * 5, 不断通过缺页中断加载用户程序的全部内 容
+ * 
+ * 运行:
+ * 1, 程序需要压栈
+ * 
+*/
 void do_no_page(unsigned long error_code,unsigned long address)
 {
 	int nr[4];
@@ -642,11 +682,11 @@ void do_no_page(unsigned long error_code,unsigned long address)
     // 并映射到指定线性地址处。进程任务结构字段start_code是线性地址空间中进程代
     // 码段地址，字段end_data是代码加数据长度。对于Linux0.11内核，它的代码段和
     // 数据段其实基址相同。
-	if (!current->executable || tmp >= current->end_data) {
-		get_empty_page(address);
+	if (!current->executable || tmp >= current->end_data) {  // 加载程序时，条件为假； 程序执行压栈时，条件为真；executable为程序所在文件i节点，end_data为程序代码末 端
+		get_empty_page(address);                             // 申请空闲页面
 		return;
 	}
-	if (share_page(tmp))
+	if (share_page(tmp))             //试图和其他进程共享
 		return;
 	if (!(page = get_free_page()))
 		oom();
@@ -660,7 +700,7 @@ void do_no_page(unsigned long error_code,unsigned long address)
 	block = 1 + tmp/BLOCK_SIZE;
 	for (i=0 ; i<4 ; block++,i++)
 		nr[i] = bmap(current->executable,block);
-	bread_page(page,current->executable->i_dev,nr);
+	bread_page(page,current->executable->i_dev,nr);         //从硬盘上读取程序的信息。
     // 在读设备逻辑块操作时，可能会出现这样一种情况，即在执行文件中的读取页面位
     // 置可能离文件尾不到1个页面的长度。因此就可能读入一些无用的信息，下面的操作
     // 就是把这部分超出执行文件end_data以后的部分清零处理。
@@ -672,7 +712,7 @@ void do_no_page(unsigned long error_code,unsigned long address)
 	}
     // 最后把引起缺页异常的一页物理页面映射到指定线性地址address处。若操作成功
     // 就返回。否则就释放内存页，显示内存不够。
-	if (put_page(page,address))
+	if (put_page(page,address))          // 将程序所在的页映射到进程的线性地址空间内
 		return;
 	free_page(page);
 	oom();
@@ -692,6 +732,11 @@ void do_no_page(unsigned long error_code,unsigned long address)
 // 设备内存占用）。
 // 参数start_mem是可用做页面分配的主内存区起始地址（已去除RANDISK所占内存空间）。
 // end_mem是实际物理内存最大地址。而地址范围start_mem到end_mem是主内存区。
+//
+/**
+ * 1 MB以内是内核代码和只有由内核管控的大部分数据所在内存空间，是绝对不允许用户进程访问的。
+ * 
+ */
 void mem_init(long start_mem, long end_mem)
 {
 	int i;
@@ -709,7 +754,7 @@ void mem_init(long start_mem, long end_mem)
 	end_mem -= start_mem;
 	end_mem >>= 12;             // 主内存区中的总页面数
 	while (end_mem-->0)
-		mem_map[i++]=0;         // 主内存区页面对应字节值清零
+		mem_map[i++]=0;         // 主内存区页面对应字节值清零. 能够占用的页面，引用计数设置为0
 }
 
 //// 计算内存空闲页面数并显示

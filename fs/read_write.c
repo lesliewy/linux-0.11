@@ -77,6 +77,12 @@ int sys_lseek(unsigned int fd,off_t offset, int origin)
 
 //// 读文件系统调用
 // 参数fd是文件句柄，buf是缓冲区，count是预读字节数
+/**
+ * 读文件就是从用户进程打开的文件中读取数据
+ * 1, 确定数据块在外设中的位置
+ * 2, 将数据块读入缓冲块
+ * 3, 将缓冲块中的数据复制到进程空 间
+*/
 int sys_read(unsigned int fd,char * buf,int count)
 {
 	struct file * file;
@@ -111,7 +117,7 @@ int sys_read(unsigned int fd,char * buf,int count)
 			count = inode->i_size - file->f_pos;
 		if (count<=0)
 			return 0;
-		return file_read(inode,file,buf,count);
+		return file_read(inode,file,buf,count);      //读取进程指定数据
 	}
     // 执行到这里，说明我们无法判断文件的属性。则打印节点文件属性，并返回出错码退出。
 	printk("(Read)inode->i_mode=%06o\n\r",inode->i_mode);
@@ -120,6 +126,14 @@ int sys_read(unsigned int fd,char * buf,int count)
 
 //// 写文件系统调用
 // 参数fd是文件句柄，buf是用户缓冲区，count是欲写字节数。
+/**
+ * 1, 确定文件的写入位置.
+ * 2, 申请缓冲块.
+ * 3, 将指定的数据从进程空间复制到 缓冲块
+ * 4, 数据同步到外设.
+ *    一种是update定期同步； fs/buffer.c: sys_sync()
+ * 	  另一种是因缓冲区使用达到 极限，操作系统强行同步。   read_write.c: sys_write -> file_dev.c: file_write() -> buffer.c: bread() -> buffer.c : getblk() 在此完成同步.
+*/
 int sys_write(unsigned int fd,char * buf,int count)
 {
 	struct file * file;

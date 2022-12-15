@@ -228,6 +228,9 @@ device_not_available:
 # 定时芯片8253/8254是在kernel/sched.c中初始化的。因此这里jiffies每10 ms加1.
 # 这段代码将jiffies增1，发送结束中断指令给8259控制器，然后用当前特权级作为
 # 参数调用C函数do_timer(long CPL).当调用返回时转去检测并处理信号。
+#
+# -> sched.c do_timer()
+#
 .align 2
 timer_interrupt:
 	push %ds		# save ds,es and put kernel data space
@@ -267,6 +270,8 @@ sys_execve:
 ### sys_fork()调用，用于创建子进程，是system_call功能2.
 # 首先调用C函数find_empty_process()，取得一个进程号PID。若返回负数则说明目前任务数组
 # 已满。然后调用copy_process()复制进程。
+# 
+# 进程创建: find_empty_process, copy_process
 .align 2
 sys_fork:
 	call find_empty_process

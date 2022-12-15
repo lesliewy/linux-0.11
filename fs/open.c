@@ -205,6 +205,12 @@ int sys_chown(const char * filename,int uid,int gid)
 // （用户具有读文件权限）、S_IRWXG（组成员具有读、写和执行权限）等等。对于新创
 // 建的文件，这些属性只应用与将来对文件的访问，创建了只读文件的打开调用也将返回
 // 一个可读写的文件句柄。如果调用操作成功，则返回文件句柄(文件描述符)，否则返回出错码。
+/**
+ * 1, 将用户进程task_struct中的 *filp[20]与内核中的file_table[64]进行挂接。
+ * 2, 以用户给定的路径 名“/mnt/user/user1/user2/hello.txt”为线 索，找到hello.txt文件的i节点。
+ * 3, 将hello.txt对应的i节点在 file_table[64]中进行登记
+ * 返回fd: 就是hello.txt文件的“标签”。这个 参数传入内核后，系统就可以根据fd找到挂接点. 实际上是task_struct.filp[]的位移.
+*/
 int sys_open(const char * filename,int flag,int mode)
 {
 	struct m_inode * inode;
@@ -215,6 +221,7 @@ int sys_open(const char * filename,int flag,int mode)
     // 为了为打开文件建立一个文件句柄，需要搜索进程结构中文件结构指针数组，以查
     // 找一个空闲项。空闲项的索引号fd即是文件句柄值。若已经没有空闲项，则返回出错码。
 	mode &= 0777 & ~current->umask;
+	/** 遍历进程1的filp, 直到获取一个空闲项，fd就是这个空闲项的项号 */
 	for(fd=0 ; fd<NR_OPEN ; fd++)
 		if (!current->filp[fd])
 			break;
@@ -241,8 +248,9 @@ int sys_open(const char * filename,int flag,int mode)
     // 引用计数递增1。然后调用函数open_namei()执行打开操作，若返回值小于0，则说
     // 明出错，于是释放刚申请到的文件结构，返回出错码i。若文件打开操作成功，则
     // inode是已打开文件的i节点指针。
-	(current->filp[fd]=f)->f_count++;
-	if ((i=open_namei(filename,flag,mode,&inode))<0) {
+	(current->filp[fd]=f)->f_count++;   // 将当前进程的 *filp[20]与file_table[64]对应项挂接，并增加文件句柄计数
+	// fs/namei.c: open_namei()  新建文件的逻辑主要在这里.
+	if ((i=open_namei(filename,flag,mode,&inode))<0) {  
 		current->filp[fd]=NULL;
 		f->f_count=0;
 		return i;
@@ -288,6 +296,12 @@ int sys_open(const char * filename,int flag,int mode)
 //// 创建文件系统调用
 // 参数pathname是路径名，mode与上面的sys_open()函数相同。
 // 成功则返回文件句柄，否则返回出错码。
+/**
+ * 新建文件和打开文件的代码, 由sys_open()完成.
+ * 1, 查找文件
+ * 2, 新建文件i节点
+ * 3, 新建文件目录项.
+*/
 int sys_creat(const char * pathname, int mode)
 {
 	return sys_open(pathname, O_CREAT | O_TRUNC, mode);
@@ -296,6 +310,10 @@ int sys_creat(const char * pathname, int mode)
 //// 关闭文件系统调用
 // 参数fd是文件句柄。
 // 成功则返回0，否则返回出错码。
+/**
+ * 1, 当前进程的filp与file_table[64] 脱钩
+ * 2, 文件i节点被释放
+*/
 int sys_close(unsigned int fd)
 {	
 	struct file * filp;

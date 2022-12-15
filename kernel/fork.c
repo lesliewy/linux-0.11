@@ -62,6 +62,9 @@ void verify_area(void * addr,int size)
 // (copy on write)技术，因此这里仅为新进程设置自己的页目录表项和页表项，而
 // 没有实际为新进程分配物理内存页面。此时新进程与其父进程共享所有内存页面。
 // 操作成功返回0，否则返回出错号。
+/**
+ * 为进程分段和分页.
+*/
 int copy_mem(int nr,struct task_struct * p)
 {
 	unsigned long old_data_base,new_data_base,data_limit;
@@ -72,8 +75,8 @@ int copy_mem(int nr,struct task_struct * p)
     // 当前进程代码段和数据段在线性地址空间中的基地址。由于Linux-0.11内核
     // 还不支持代码和数据段分立的情况，因此这里需要检查代码段和数据段基址
     // 和限长是否都分别相同。否则内核显示出错信息，并停止运行。
-	code_limit=get_limit(0x0f);
-	data_limit=get_limit(0x17);
+	code_limit=get_limit(0x0f);   //获取当前进程，即shell代 码段段限长
+	data_limit=get_limit(0x17);   //获取当前进程，即shell数 据段段限长
 	old_code_base = get_base(current->ldt[1]);
 	old_data_base = get_base(current->ldt[2]);
 	if (old_data_base != old_code_base)
@@ -85,11 +88,11 @@ int copy_mem(int nr,struct task_struct * p)
     // 的页目录表项和页表项，即复制当前进程(父进程)的页目录表项和页表项。
     // 此时子进程共享父进程的内存页面。正常情况下copy_page_tables()返回0，
     // 否则表示出错，则释放刚申请的页表项。
-	new_data_base = new_code_base = nr * 0x4000000;
+	new_data_base = new_code_base = nr * 0x4000000;    //根据 在task[64]中确定的项号nr，确定段基址
 	p->start_code = new_code_base;
-	set_base(p->ldt[1],new_code_base);
-	set_base(p->ldt[2],new_data_base);
-	if (copy_page_tables(old_data_base,new_data_base,data_limit)) {
+	set_base(p->ldt[1],new_code_base);                 //参考strl进程 代码基址设置它的LDT
+	set_base(p->ldt[2],new_data_base);                 //参考str1进程 数据段基址设置它的LDT
+	if (copy_page_tables(old_data_base,new_data_base,data_limit)) {    //调用此函数 为进程分页
 		printk("free_page_tables: from copy_mem\n");
 		free_page_tables(new_data_base,data_limit);
 		return -ENOMEM;
@@ -110,10 +113,39 @@ int copy_mem(int nr,struct task_struct * p)
 // 2. 在刚进入system_call时压入栈的段寄存器ds、es、fs和edx、ecx、ebx；
 // 3. 调用sys_call_table中sys_fork函数时压入栈的返回地址(用参数none表示)；
 // 4. 在调用copy_process()分配任务数组项号。
+
+/**
+ * 将在 copy_process（）函数中做非常重要的、体现父子进程创建机制的工作
+ * 1）为进程申请页面. 
+ *    页面在内核的线性地址空间； 线性地址空间即每个进程的4G的内存空间。
+ *    页面用来保存task_struct和内核栈；
+ *    将进程的task_struct挂接到task[]中
+ * 
+ * 2）复制父进程的task_struct结构，并做个性化设置,包括TSS.
+ * 
+ * 3）为进程分段、分页.
+ *    分段: 即确定线性地址空间,主要是段基址和段限长。
+ *    根据task[64]中的项号nr来确定进程段基址, 并用段基址设置LDT(数据段和代码段位置)， 段限长已经存储在LDT中了。
+ * 	  分页：基于分段，复制的是页目录项和页表,会新建页表。父进程的页表项全部复制给子进程并设置子进程的页目录项，这两个进程就共享页面了。
+ *    注意：页目录表在内核中，在地址的低位， 而页表和页不在内核中，在地址的高位。
+ * 
+ * 4）文件继承
+ *    父进程打开的文件，它的子进程一并继承，会递增引用计数.
+ * 
+ * 5）关联全局描述符表（GDT）
+ *    将进程TSS和 LDT挂接在GDT的指定位置处， GDT在内核中.
+ * 
+ * 6）最后将进程设置为就绪态，使其可以参 与进程间的轮转。
+ * 
+ * 多进程的线性地址空间分配: 假设有3个进程，它们在 task[64]中的项号依次为4、5、6。它们在线性地址空间的位置应该依次 是4×64～5×64 MB、5×64～6×64 MB、 6×64～7×64 MB。
+ * 每个进程执行时申请的空闲页面，都映射到该进程的线性空间内。 逻辑地址可能会相同。但它们的线性地址不同。
+ * 
+ * 
+*/
 int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
 		long ebx,long ecx,long edx,
 		long fs,long es,long ds,
-		long eip,long cs,long eflags,long esp,long ss)
+		long eip,long cs,long eflags,long esp,long ss)        //这个nr就是task[64]中的项号
 {
 	struct task_struct *p;
 	int i;
@@ -126,14 +158,18 @@ int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
 	p = (struct task_struct *) get_free_page();
 	if (!p)
 		return -EAGAIN;
-	task[nr] = p;
-	*p = *current;	/* NOTE! this doesn't copy the supervisor stack */
+	task[nr] = p;            //将str1进程的task_struct挂接到task[64]中 
+	/*current指向当前进程的task_struct的指针，当前进程是进程 0。
+	 * 下面这行的意思：将父进程的task_struct赋给子进程。这是父子 进程创建机制的重要体现。这行代码执行后，父子进程的task_struct 将完全一样
+	 * 重要！注意指针类型，只复制task_struct，并未将4 KB都复 制，即进程0的内核栈并未复制
+	 */
+	*p = *current;	/* NOTE! this doesn't copy the supervisor stack */   //复制task_struct结构给str1进程
     // 随后对复制来的进程结构内容进行一些修改，作为新进程的任务结构。先将
     // 进程的状态置为不可中断等待状态，以防止内核调度其执行。然后设置新进程
     // 的进程号pid和父进程号father，并初始化进程运行时间片值等于其priority值
     // 接着复位新进程的信号位图、报警定时值、会话(session)领导标志leader、进程
     // 及其子进程在内核和用户态运行时间统计值，还设置进程开始运行的系统时间start_time.
-	p->state = TASK_UNINTERRUPTIBLE;
+	p->state = TASK_UNINTERRUPTIBLE;//str1进程被设置为不 可中断等待状态, 防止程序执行混乱.
 	p->pid = last_pid;              // 新进程号。也由find_empty_process()得到。
 	p->father = current->pid;       // 设置父进程
 	p->counter = p->priority;       // 运行时间片值
@@ -178,10 +214,9 @@ int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
     // 指定的内存区域中。
 	if (last_task_used_math == current)
 		__asm__("clts ; fnsave %0"::"m" (p->tss.i387));
-    // 接下来复制进程页表。即在线性地址空间中设置新任务代码段和数据段描述符中的基址和限长，
-    // 并复制页表。如果出错(返回值不是0)，则复位任务数组中相应项并释放为该新任务分配的用于
-    // 任务结构的内存页。
-	if (copy_mem(nr,p)) {
+    // 设置子进程的代码段、数据段及创建、复制子进程的第一个页表
+	// 如果出错(返回值不是0)，则复位任务数组中相应项并释放为该新任务分配的用于任务结构的内存页。
+	if (copy_mem(nr,p)) {      // 为进程分段，分页
 		task[nr] = NULL;
 		free_page((long) p);
 		return -EAGAIN;
@@ -203,13 +238,17 @@ int copy_process(int nr,long ebp,long edi,long esi,long gs,long none,
     // 任务nr的TSS描述符项在全局表中的地址。因为每个任务占用GDT表中2项，因此上式中
     // 要包括'(nr<<1)'.程序然后把新进程设置成就绪态。另外在任务切换时，任务寄存器tr由
     // CPU自动加载。最后返回新进程号。
-	set_tss_desc(gdt+(nr<<1)+FIRST_TSS_ENTRY,&(p->tss));
-	set_ldt_desc(gdt+(nr<<1)+FIRST_LDT_ENTRY,&(p->ldt));
-	p->state = TASK_RUNNING;	/* do this last, just in case */
+	set_tss_desc(gdt+(nr<<1)+FIRST_TSS_ENTRY,&(p->tss));   //将进程的TSS挂接在GDT上并设置段信息
+	set_ldt_desc(gdt+(nr<<1)+FIRST_LDT_ENTRY,&(p->ldt));   //将进程的LDT挂接在GDT上并设置段信息
+	p->state = TASK_RUNNING;	/* do this last, just in case  将进程1的状态设置为就绪态，使它可以参 加进程调度*/
 	return last_pid;
 }
 
 // 为新进程取得不重复的进程号last_pid.函数返回在任务数组中的任务号(数组项)。
+/**
+ * 为进程申请一个可用的进程号、在task[64]中为该进程申请一个空闲位置。
+ * task[] 属于内核数据区.
+*/
 int find_empty_process(void)
 {
 	int i;

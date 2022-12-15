@@ -49,7 +49,12 @@ struct i387_struct {
 	long	fos;
 	long	st_space[20];	/* 8*10 bytes for each FP-reg = 80 bytes */
 };
-
+/**
+ *  每个进程都会有TSS和LDT.
+ *  TSS: 任务状态描述符表. 为进程间切换而设计的, 进程切换时，一整套寄存器的值随之切换，tss就是用来保存寄存器值的. 用这些数值来设置寄存器，是CPU自动完成的,在内核中找不到给寄存器赋值的代码.
+ *  LDT: 局部数据描述符表
+ * 
+ */
 struct tss_struct {
 	long	back_link;	/* 16 high bits zero */
 	long	esp0;
@@ -82,8 +87,8 @@ struct task_struct {
 	long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
 	long counter;
 	long priority;
-	long signal;
-	struct sigaction sigaction[32];
+	long signal;       // 信号位图. 进程收到某个信号后就置为1. p->signal |= (1<<(sig-1));
+	struct sigaction sigaction[32];     // 每一个元素代表一种信号. 
 	long blocked;	/* bitmap of masked signals */
 /* various fields */
 	int exit_code;
@@ -101,7 +106,7 @@ struct task_struct {
 	struct m_inode * root;
 	struct m_inode * executable;
 	unsigned long close_on_exec;
-	struct file * filp[NR_OPEN];
+	struct file * filp[NR_OPEN];           // 进程打开了哪些文件
 /* ldt for this task 0 - zero 1 - cs 2 - ds&ss */
 	struct desc_struct ldt[3];
 /* tss for this task */
@@ -176,7 +181,7 @@ __asm__("cmpl %%ecx,current\n\t" \
 	"je 1f\n\t" \
 	"movw %%dx,%1\n\t" \
 	"xchgl %%ecx,current\n\t" \
-	"ljmp *%0\n\t" \
+	"ljmp *%0\n\t" \       // 从这里切走线程，返回后从下面继续执行. 对于main -> init -> setup() 返回切换的发起者 sleep_on（）函数中，并最终返回bread（）函 数中。
 	"cmpl %%ecx,last_task_used_math\n\t" \
 	"jne 1f\n\t" \
 	"clts\n" \

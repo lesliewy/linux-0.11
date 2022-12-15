@@ -130,13 +130,17 @@
 #define __NR_setreuid	70
 #define __NR_setregid	71
 
+/**
+ * 如果name是fork: 将fork在sys_call_table[]中对应的函数编号 __NR_fork（也就是2）赋值给eax。这个编号即 sys_fork（）函数在sys_call_table中的偏移 值
+ * 紧接着就执行"int$0x80"，产生一个软中断，CUP从3特权级的进程0代码跳到0特权级内 核代码中执行。
+*/
 #define _syscall0(type,name) \
 type name(void) \
 { \
 long __res; \
 __asm__ volatile ("int $0x80" \
 	: "=a" (__res) \
-	: "0" (__NR_##name)); \
+	: "0" (__NR_##name)); \          
 if (__res >= 0) \
 	return (type) __res; \
 errno = -__res; \

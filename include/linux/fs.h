@@ -46,7 +46,7 @@ void buffer_init(long buffer_end);
 #define NR_SUPER 8
 #define NR_HASH 307
 #define NR_BUFFERS nr_buffers
-#define BLOCK_SIZE 1024
+#define BLOCK_SIZE 1024          /* 数据块大小 */
 #define BLOCK_SIZE_BITS 10
 #ifndef NULL
 #define NULL ((void *) 0)
@@ -91,34 +91,34 @@ struct d_inode {
 };
 
 struct m_inode {
-	unsigned short i_mode;
-	unsigned short i_uid;
-	unsigned long i_size;
-	unsigned long i_mtime;
-	unsigned char i_gid;
-	unsigned char i_nlinks;
-	unsigned short i_zone[9];
+	unsigned short i_mode;          // 文件的类型和属性   0x41ed （drwxr-xr-x）
+	unsigned short i_uid;           // 文件宿主用户id  0x0000
+	unsigned long i_size;           // 文件长度 0x00000030 （48 字节）
+	unsigned long i_mtime;          // 修改时间（自 1970.1.1:0 算起，秒）
+	unsigned char i_gid;            // 文件组 id 0x00
+	unsigned char i_nlinks;         // 链接数, 当前文件被进程打开的数量. 0x02
+	unsigned short i_zone[9];       // 直接(0-6)、间接(7)或双重间接(8)逻辑块号。
 /* these are in memory also */
 	struct task_struct * i_wait;
-	unsigned long i_atime;
-	unsigned long i_ctime;
-	unsigned short i_dev;
-	unsigned short i_num;
+	unsigned long i_atime;          // 最后访问时间。
+	unsigned long i_ctime;          // i 节点自身修改时间
+	unsigned short i_dev;           // i 节点所在的设备号
+	unsigned short i_num;           // i 节点号
 	unsigned short i_count;
 	unsigned char i_lock;
 	unsigned char i_dirt;
 	unsigned char i_pipe;
-	unsigned char i_mount;
+	unsigned char i_mount;          // 安装标志。
 	unsigned char i_seek;
 	unsigned char i_update;
 };
 
 struct file {
-	unsigned short f_mode;
-	unsigned short f_flags;
-	unsigned short f_count;
-	struct m_inode * f_inode;
-	off_t f_pos;
+	unsigned short f_mode;             // 文件操作模式（RW 位）
+	unsigned short f_flags;            // 文件打开和控制的标志。
+	unsigned short f_count;            // 对应文件句柄引用计数。
+	struct m_inode * f_inode;          // 指向对应内存 i 节点，即现在系统中的 v 节点。
+	off_t f_pos;                       // 文件当前读写指针位置。
 };
 
 struct super_block {

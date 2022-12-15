@@ -331,8 +331,8 @@ repeat:
 		goto repeat;
     // 如果该缓冲区已被修改，则将数据写盘，并再次等待缓冲区解锁。同样地，若该缓冲区
     // 又被其他任务使用的话，只好再重复上述寻找过程。
-	while (bh->b_dirt) {
-		sync_dev(bh->b_dev);
+	while (bh->b_dirt) {          //虽然找到空闲缓冲块，但b_dirt仍是 1，说明缓冲区中已无可用的缓冲块了，需要同步腾空
+		sync_dev(bh->b_dev);      //同步数据
 		wait_on_buffer(bh);
 		if (bh->b_count)
 			goto repeat;
@@ -379,6 +379,7 @@ void brelse(struct buffer_head * buf)
 // 该函数根据指定的设备号 dev 和数据块号 block，首先在高速缓冲区中申请一块
 // 缓冲块。如果该缓冲块中已经包含有有效的数据就直接返回该缓冲块指针，否则
 // 就从设备中读取指定的数据块到该缓冲块中并返回缓冲块指针。
+/** bread（）-> ll_rw_block（) -> make_request（）-> add_request（）-> do_hd_request（）-> hd_out（）*/
 struct buffer_head * bread(int dev,int block)
 {
 	struct buffer_head * bh;
@@ -394,7 +395,9 @@ struct buffer_head * bread(int dev,int block)
     // 等待指定数据块被读入，并等待缓冲区解锁。在睡眠醒来之后，如果该缓冲区已
     // 更新，则返回缓冲区头指针，退出。否则表明读设备操作失败，于是释放该缓
     // 冲区，返回NULL，退出。
+	/** ll_rw_blk.c 将缓冲块与请求项结构挂接 */
 	ll_rw_block(READ,bh);
+	/** 数据还没有从硬盘中读完，所以调用 wait_on_buffer（）函数，挂起等待！*/
 	wait_on_buffer(bh);
 	if (bh->b_uptodate)
 		return bh;

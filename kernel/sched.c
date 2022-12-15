@@ -133,6 +133,9 @@ void math_state_restore()
  * tasks can run. It can not be killed, and it cannot sleep. The 'state'
  * information in task[0] is never used.
  */
+/**
+ * 所有进程的时间片都用完时，会重新分配时间片。
+*/
 void schedule(void)
 {
 	int i,next,c;
@@ -153,9 +156,9 @@ void schedule(void)
             // 如果信号位图中除被阻塞的信号外还有其他信号，并且任务处于可中断状态，则
             // 置任务为就绪状态。其中'~(_BLOCKABLE & (*p)->blocked)'用于忽略被阻塞的信号，但
             // SIGKILL 和SIGSTOP不能呗阻塞。
-			if (((*p)->signal & ~(_BLOCKABLE & (*p)->blocked)) &&
+			if (((*p)->signal & ~(_BLOCKABLE & (*p)->blocked)) &&    //遍历进程，检测到其接收的信号且进程还是可中断等待状态
 			(*p)->state==TASK_INTERRUPTIBLE)
-				(*p)->state=TASK_RUNNING;
+				(*p)->state=TASK_RUNNING;             // 将其设置为就绪态
 		}
 
 /* this is the scheduler proper: */
@@ -178,14 +181,16 @@ void schedule(void)
         // 仍然为-1，next=0),则退出while(1)_的循环，执行switch任务切换操作。否则就根据每个
         // 任务的优先权值，更新每一个任务的counter值，然后回到while(1)循环。counter值的计算
         // 方式counter＝counter/2 + priority.注意：这里计算过程不考虑进程的状态。
+		/** 不需要给进程0进行分配。这是因为，只要系统中 所有进程都暂时不具备执行条件，就自动切换到 进程0去执行。进程0将一直执行下去，即便在此 过程中它的时间片削减为0了 */
 		if (c) break;
 		for(p = &LAST_TASK ; p > &FIRST_TASK ; --p)
 			if (*p)
-				(*p)->counter = ((*p)->counter >> 1) +
+				(*p)->counter = ((*p)->counter >> 1) + 
 						(*p)->priority;
 	}
     // 用下面的宏把当前任务指针current指向任务号Next的任务，并切换到该任务中运行。上面Next
     // 被初始化为0。此时任务0仅执行pause()系统调用，并又会调用本函数。
+	/** 特殊情况：当所有进程都挂起的时候，内核会执行switch_to强 行切换到进程0。*/
 	switch_to(next);     // 切换到Next任务并运行。
 }
 
@@ -195,6 +200,7 @@ void schedule(void)
 // pause()返回值应该是-1，并且errno被置为EINTR。这里还没有完全实现(直到0.95版)
 int sys_pause(void)
 {
+	/** 将进程0设置为可中断等待状态，如果产生某种中断，或其他进 程给这个进程发送特定信号……才有可能将//这个进程的状态改为就绪态 */
 	current->state = TASK_INTERRUPTIBLE;
 	schedule();
 	return 0;
@@ -440,6 +446,14 @@ void add_timer(long jiffies, void (*fn)(void))
 // 参数cpl是当前特权级0或3，是时钟中断发生时正在被执行的代码选择符中的特权级。
 // cpl=0时表示中断发生时正在执行内核代码；cpl=3表示中断发生时正在执行用户代码。
 // 对于一个进程由于执行时间片用完时，则进城任务切换。并执行一个计时更新工作。
+/**
+ * 两种情况下会导致进程切换：
+ *   时钟中断：每10毫秒就会产生一次，和进程无关。
+ *   进程执行引起的中断： 比如读硬盘.
+ * 
+ * 时钟中断: 每10毫秒就会产生一次, 削减进程的时间片。 被削减为0时且特权级为3， 此时就会调用schedule()
+ * 
+*/
 void do_timer(long cpl)
 {
 	extern int beepcount;               // 扬声器发声滴答数
@@ -476,9 +490,9 @@ void do_timer(long cpl)
 		do_floppy_timer();
     // 如果进程运行时间还没完，则退出。否则置当前任务计数值为0.并且若发生时钟中断
     // 正在内核代码中运行则返回，否则调用执行调度函数。
-	if ((--current->counter)>0) return;
+	if ((--current->counter)>0) return;      //判断时间片是否削 减为0
 	current->counter=0;
-	if (!cpl) return;                       // 内核态程序不依赖counter值进行调度
+	if (!cpl) return;                       // 内核态程序不依赖counter值进行调度. 只有在3特权级下才能切换，0特权级下不能切换
 	schedule();
 }
 
@@ -543,7 +557,21 @@ int sys_nice(long increment)
 	return 0;
 }
 
-// 内核调度程序的初始化子程序
+/**
+ * 内核调度程序的初始化子程序
+ * 1, 初始化进程0
+ *   进程0的task_struct是由操作系统设计者事先写好的， 并用INIT_TASK的指针初始化task[64]的0项。
+ * 接下来用for循环将 task[64]除进程0占用的0项外的其余63项清空， 同时将GDT的TSS1、LDT1往上的所有表项清 零。\
+ * 2, 设置时钟中断
+ * 	 对支持轮询的8253定时器进行设置: LATCH是通过一个宏定义的，通过它在 sched.c中的定义“#define LATCH （1193180/HZ）”，即系统每10毫秒发生一次 时钟中断。
+ * 	 timer_interrupt（）函数挂接后，在发生时钟中断时，系统就可以通过IDT找到这个服务程 序来进行具体的处理。
+ *   从现在开始， 时钟中断每1/100秒就产生一次。由于此时处 于“关中断”状态，CPU并不响应，但进程0已经具备参与进程轮转的潜能。
+ * 3, 设置系统调用总入口
+ *   将系统调用处理函数system_call与int 0x80中断描述符表挂接。所有用户程 序使用系统调用，产生int 0x80软中断后，操作 系统都是通过这个总入口找到具体的系统调用函 数。
+ * 
+ * 系统调用：用户进程只要 想和内核打交道，就调用这套接口程序，之后， 就会立即引发int 0x80软中断，后面的事情就不 需要用户程序管了，而是通过另一条执行路线 ——由CPU对这个中断信号响应，
+ * 翻转特权级 （从用户进程的3特权级翻转到内核的0特权 级），通过IDT找到系统调用端口，调用具体的 系统调用函数来处理事务，之后，再iret翻转回 到进程的3特权级，进程继续执行原来的逻辑， 这样矛盾就解决了。
+*/
 void sched_init(void)
 {
 	int i;
@@ -554,14 +582,15 @@ void sched_init(void)
     // 必要，纯粹是为了提醒自己以及其他修改内核代码的人。
 	if (sizeof(struct sigaction) != 16)         // sigaction 是存放有关信号状态的结构
 		panic("Struct sigaction MUST be 16 bytes");
-    // 在全局描述符表中设置初始任务(任务0)的任务状态段描述符和局部数据表描述符。
+	// 在全局描述符表中设置初始任务(任务0)的任务状态段描述符和局部数据表描述符。
     // FIRST_TSS_ENTRY和FIRST_LDT_ENTRY的值分别是4和5，定义在include/linux/sched.h
     // 中；gdt是一个描述符表数组(include/linux/head.h)，实际上对应程序head.s中
     // 全局描述符表基址（_gdt）.因此gtd+FIRST_TSS_ENTRY即为gdt[FIRST_TSS_ENTRY](即为gdt[4]),
     // 也即gdt数组第4项的地址。
 	set_tss_desc(gdt+FIRST_TSS_ENTRY,&(init_task.task.tss));
 	set_ldt_desc(gdt+FIRST_LDT_ENTRY,&(init_task.task.ldt));
-    // 清任务数组和描述符表项(注意 i=1 开始，所以初始任务的描述符还在)。描述符项结构
+    // 1往后的项清空。0项为进 程0所用
+	// 清任务数组和描述符表项(注意 i=1 开始，所以初始任务的描述符还在)。描述符项结构
     // 定义在文件include/linux/head.h中。
 	p = gdt+2+FIRST_TSS_ENTRY;
 	for(i=1;i<NR_TASKS;i++) {
@@ -575,8 +604,9 @@ void sched_init(void)
     // NT标志用于控制程序的递归调用(Nested Task)。当NT置位时，那么当前中断任务执行
     // iret指令时就会引起任务切换。NT指出TSS中的back_link字段是否有效。
 	__asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");        // 复位NT标志
-	ltr(0);
-	lldt(0);
+	/** 将TR寄存器指向TSS0、LDTR 寄存器指向LDT0，这样，CPU就能通过TR、 LDTR寄存器找到进程0的TSS0、LDT0，也能找 到一切和进程0相关的管理信息。*/
+	ltr(0);  //重要！将TSS挂接到TR寄存器
+	lldt(0); //重要！将LDT挂接到LDTR寄存器
     // 下面代码用于初始化8253定时器。通道0，选择工作方式3，二进制计数方式。通道0的
     // 输出引脚接在中断控制主芯片的IRQ0上，它每10毫秒发出一个IRQ0请求。LATCH是初始
     // 定时计数值。
@@ -586,7 +616,7 @@ void sched_init(void)
     // 设置时钟中断处理程序句柄(设置时钟中断门)。修改中断控制器屏蔽码，允许时钟中断。
     // 然后设置系统调用中断门。这两个设置中断描述符表IDT中描述符在宏定义在文件
     // include/asm/system.h中。
-	set_intr_gate(0x20,&timer_interrupt);
+	set_intr_gate(0x20,&timer_interrupt);   //重要！设置时 钟中断，进程调度的基础
 	outb(inb_p(0x21)&~0x01,0x21);
-	set_system_gate(0x80,&system_call);
+	set_system_gate(0x80,&system_call);     //重要！设置系 统调用总入口
 }

@@ -60,6 +60,18 @@ static inline void get_new(char * from,char * to)
 // 由Libc库提供。用于在信号处理程序结束后恢复系统调用返回时几个寄存器的原有值以及系统
 // 调用的返回值，就好像系统调用没有执行过信号处理程序而直接返回到用户程序一样。
 // 函数返回原信号句柄。
+/**
+ * 信号的发送和接收的两种方式：
+ *    1, 一个进程通过调用特定的库函数给另一个进程发送信号；   kernel/exit.c: sys_kill
+ *    2, 用户通过键盘输入信 息产生键盘中断后，中断服务程序给进程发送信 号
+ * 
+ * 检测信号的两种方式：
+ *    1, 系统调用返回之前检测当前进程是否接收到信号  system_call.s ret_from_sys_call -> signal.c do_signal()
+ *    2, 时钟中断产生后，其中断服务程序执行结束之前，检测当前进程是否接收到信号
+ * 
+ * 信号注册: sys_signal
+ * 
+*/
 int sys_signal(int signum, long handler, long restorer)
 {
 	struct sigaction tmp;
@@ -71,12 +83,16 @@ int sys_signal(int signum, long handler, long restorer)
     // 然后根据提供的参数组建sigaction结构内容。sa_handler是指定的信号处理句柄(函数)。
     // sa_mask是执行信号处理句柄时的信号屏蔽码。sa_flags是执行时的一些标志组合。这里
     // 设定该信号处理句柄只使用1次后就恢复到默认值，并允许信号在自己的处理句柄中收到。
-	tmp.sa_handler = (void (*)(int)) handler;
+	tmp.sa_handler = (void (*)(int)) handler;     //此时 handler参数就是processsig进程程序中"signal（SIGUSR1， sig_usr）"这行代码中sig_usr函数的地址.
 	tmp.sa_mask = 0;
 	tmp.sa_flags = SA_ONESHOT | SA_NOMASK;
+	/**
+	 * restorer 是一个库函数的地址，它是由signal这个库函数传递下来的实参。这个库函数将来会在信号处理工作结束后恢复用户进程执行的“指令和数据”， 
+	 * 并最终跳转到用户程序的“中断位置”处执行。
+	*/
 	tmp.sa_restorer = (void (*)(void)) restorer;        // 保存恢复处理函数指针
     // 接着取该信号原来的处理句柄，并设置该信号的sigaction结构，最后返回原信号句柄。
-	handler = (long) current->sigaction[signum-1].sa_handler;
+	handler = (long) current->sigaction[signum-1].sa_handler;       //sigaction[signum- 1]这一项将为SIGUSR1信号提供服务
 	current->sigaction[signum-1] = tmp;
 	return handler;
 }
@@ -116,6 +132,11 @@ int sys_sigaction(int signum, const struct sigaction * action,
 // 2. 刚进入system_call时压入栈的寄存器ds,es,fs和edx，ecx,ebx；
 // 3. 调用sys_call_table后压入栈中的相应系统调用处理函数的返回值(eax)。
 // 4. 压入栈中的当前处理的信号值(signr)
+/**
+ * 1, 检查信号处理函数指针
+ * 2, 对用户栈中的数据进行调整，使得此次系统调用返回后会“首先”执行进程的“信号处理函数”，然后再从用户进程“中断位置”继续执行
+ * 
+*/
 void do_signal(long signr,long eax, long ebx, long ecx, long edx,
 	long fs, long es, long ds,
 	long eip, long cs, long eflags,
@@ -136,8 +157,8 @@ void do_signal(long signr,long eax, long ebx, long ecx, long edx,
 	sa_handler = (unsigned long) sa->sa_handler;
 	if (sa_handler==1)
 		return;
-	if (!sa_handler) {
-		if (signr==SIGCHLD)
+	if (!sa_handler) {           //如果函数指针为空
+		if (signr==SIGCHLD)      //如果是SIGCHLD信号，直接返回
 			return;
 		else
 			do_exit(1<<(signr-1));      // 不再返回到这里

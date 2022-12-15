@@ -17,6 +17,11 @@
 //// 文件读函数 - 根据i节点和文件结构，读取文件中数据。
 // 由i节点我们可以知道设备号，由filp结构可以知道文件中当前读写指针位置。buf指定
 // 用户空间中缓冲区位置，count是需要读取字节数。返回值是实际读取的字节数，或出错号(小于0).
+/**
+ * 1, 确定数据块在外设中的位置
+ * 2, 将数据块读入缓冲块
+ * 3, 将缓冲块中的数据复制到进程空 间(*buf)
+*/
 int file_read(struct m_inode * inode, struct file * filp, char * buf, int count)
 {
 	int left,chars,nr;
@@ -30,7 +35,7 @@ int file_read(struct m_inode * inode, struct file * filp, char * buf, int count)
     // 指针为NULL。(filp->f_pos)/BLOCK_SIZE用于计算出文件当前指针所在的数据块号。
 	if ((left=count)<=0)
 		return 0;
-	while (left) {
+	while (left) {      //每次循环，最多将一个缓冲块（1 KB）的数据 复制到buf空间内
 		if ((nr = bmap(inode,(filp->f_pos)/BLOCK_SIZE))) {
 			if (!(bh=bread(inode->i_dev,nr)))
 				break;
@@ -41,6 +46,7 @@ int file_read(struct m_inode * inode, struct file * filp, char * buf, int count)
         // 即为本次操作需读取的字节数chars。如果(BLOCK_SIZE-nr) > left，则说明该块
         // 是需要读取的最后一块数据。反之还需要读取下一块数据。之后调整读写文件指针。
         // 指针前移此次将读取的字节数chars，剩余字节计数left相应减去chars。
+		/* 以下4行是计算具体要复制 多少字节的数据到用户空间 */
 		nr = filp->f_pos % BLOCK_SIZE;
 		chars = MIN( BLOCK_SIZE-nr , left );
 		filp->f_pos += chars;
@@ -49,6 +55,7 @@ int file_read(struct m_inode * inode, struct file * filp, char * buf, int count)
         // 字节到用户缓冲区buf中。否则往用户缓冲区中填入chars个0值字节。
 		if (bh) {
 			char * p = nr + bh->b_data;
+			//将chars字节的数据复制到用户指定空间 内
 			while (chars-->0)
 				put_fs_byte(*(p++),buf++);
 			brelse(bh);
@@ -91,16 +98,16 @@ int file_write(struct m_inode * inode, struct file * filp, char * buf, int count
     // 创建失败，于是退出循环。否则我们根据该逻辑块号读取设备上的相应逻辑块，若出
     // 错也退出循环。
 	while (i<count) {
-		if (!(block = create_block(inode,pos/BLOCK_SIZE)))
+		if (!(block = create_block(inode,pos/BLOCK_SIZE)))     //创建逻辑块，并返回块号
 			break;
-		if (!(bh=bread(inode->i_dev,block)))
+		if (!(bh=bread(inode->i_dev,block)))                   //申请缓冲块 （不需要读出来）
 			break;
         // 此时缓冲块指针bh正指向刚读入的文件数据库。现在再求出文件当前读写指针在该
         // 数据块中的偏移值c，并将指针p指向缓冲块中开始写入数据的位置，并置该缓冲块已
         // 修改标志。对于块中当前指针，从开始读写位置到块末共可写入c=(BLOCK_SIZE - c)
         // 个字节。若c大于剩余还需写入的字节数(count - i)，则此次只需再写入c = (count - i)
         // 个字节即可。
-		c = pos % BLOCK_SIZE;
+		c = pos % BLOCK_SIZE;           //以下代码计算向缓冲块中写入字节数
 		p = c + bh->b_data;
 		bh->b_dirt = 1;
 		c = BLOCK_SIZE-c;
@@ -117,7 +124,7 @@ int file_write(struct m_inode * inode, struct file * filp, char * buf, int count
 		}
 		i += c;
 		while (c-->0)
-			*(p++) = get_fs_byte(buf++);
+			*(p++) = get_fs_byte(buf++);     //将数据写入指定的缓冲 块, 此时用户进程指定的数据，只是写入缓冲 区中，并未写入硬盘
 		brelse(bh);
 	}
     // 当数据已全部写入文件或者在写操作工程中发生问题时就会退出循环。此时我们更改文件修改

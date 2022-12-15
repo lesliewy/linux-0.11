@@ -21,11 +21,11 @@ int read_pipe(struct m_inode * inode, char * buf, int count)
     // 是写管道进程。如果已没有写管道者，即i节点引用计数值小于2，则返回已读字
     // 节数退出。否则在该i节点上睡眠，等待信息。宏PIPE_SIZE定义在fs.h中。
 	while (count>0) {
-		while (!(size=PIPE_SIZE(*inode))) {
-			wake_up(&inode->i_wait);
+		while (!(size=PIPE_SIZE(*inode))) {       //读写指针重合 时，就视为把管道中数据都读完了
+			wake_up(&inode->i_wait);              //管道数据都读完了，唤醒写 管道进程
 			if (inode->i_count != 2) /* are there any writers? */
 				return read;
-			sleep_on(&inode->i_wait);
+			sleep_on(&inode->i_wait);             //没数据读了，将读管道进程 挂起
 		}
         // 此时说明管道(缓冲区)中有数据。于是我们取管道尾指针到缓冲区末端的字
         // 节数chars。如果其大于还需要读取的字节数count，则令其等于count。如果
@@ -48,7 +48,7 @@ int read_pipe(struct m_inode * inode, char * buf, int count)
 			put_fs_byte(((char *)inode->i_size)[size++],buf++);
 	}
     // 当此次读管道操作结束，则唤醒等待该管道的进程，并返回读取的字节数。
-	wake_up(&inode->i_wait);
+	wake_up(&inode->i_wait);  //读取了数据，意味着管道有 剩余空间了，唤醒写管道进程
 	return read;
 }
 
@@ -65,7 +65,7 @@ int write_pipe(struct m_inode * inode, char * buf, int count)
     // -1.否则让当前进程在该i节点睡眠，以等待读管道进程读取数据，从而让管道腾出
     // 空间。宏PIPE_SIZE()、PIPE_HEAD()等定义在文件fs.h中。
 	while (count>0) {
-		while (!(size=(PAGE_SIZE-1)-PIPE_SIZE(*inode))) {
+		while (!(size=(PAGE_SIZE-1)-PIPE_SIZE(*inode))) {  // 当管道中所有可写空间全被写满时，写管道 指针回滚一圈，与读管道指针差1字节
 			wake_up(&inode->i_wait);
 			if (inode->i_count != 2) { /* no readers */
 				current->signal |= (1<<(SIGPIPE-1));
@@ -103,6 +103,18 @@ int write_pipe(struct m_inode * inode, char * buf, int count)
 // 在fildes所指的数组中创建一对文件句柄(描述符)。这对句柄指向一管道i节点。
 // 参数：filedes - 文件句柄数组。fildes[0]用于读管道数据，fildes[1]向管道写入数据。
 // 成功时返回0，出错时返回-1.
+/**
+ * 1, 父进程先在file_table[64]中申请“两个”空 闲项，并将这两个空闲项的引用计数设置为1， 表示它们被引用了，父子进程以后操作管道文件 可以各用一项
+ *    file_table[]在内核数据区.
+ * 2, 进程task_struct中的*filp[20]与 file_table[64]中的表项挂接
+ * `  等到它作为父进程创建子进程时，*filp[20]中的这两个表项就会自然而然地复制给 它的子进程，使之也“天然地”和file_table[64] 结构中同样的管道文件表项建立了关系.
+ * 3, 创建管道文件i节点
+ *    管道的本质就是一个内存页面.
+ *    系统申请一个空闲内存页面，并将该页面的地址载入i节点。建立管道文件i节点与file_table[64]的关系
+ * 4, 将管道文件i节点与file_table[64]建立联 系
+ * 	  第1个空闲项的文件模式置 为读，第2个空闲项的文件模式置为写，这样， 父进程已经具备了操作管道文件的能力，由它创 建的子进程也将天然具备操作管道文件的能力
+ * 5, 将管道文件句柄返给用户进程
+*/
 int sys_pipe(unsigned long * fildes)
 {
 	struct m_inode * inode;
@@ -138,7 +150,7 @@ int sys_pipe(unsigned long * fildes)
 	}
     // 然后利用函数get_pipe_inode()申请一个管道使用的i节点，并为管道分配一页内存作为
     // 缓冲区。如果不成功，则相应释放两个文件句柄和文件结构项，并返回-1.
-	if (!(inode=get_pipe_inode())) {
+	if (!(inode=get_pipe_inode())) {          //创建管道文件i节点
 		current->filp[fd[0]] =
 			current->filp[fd[1]] = NULL;
 		f[0]->f_count = f[1]->f_count = 0;
@@ -151,7 +163,7 @@ int sys_pipe(unsigned long * fildes)
 	f[0]->f_pos = f[1]->f_pos = 0;
 	f[0]->f_mode = 1;		/* read */
 	f[1]->f_mode = 2;		/* write */
-	put_fs_long(fd[0],0+fildes);
-	put_fs_long(fd[1],1+fildes);
+	put_fs_long(fd[0],0+fildes);  //设置读管道文件句柄
+	put_fs_long(fd[1],1+fildes);  //设置写管道文件句柄
 	return 0;
 }

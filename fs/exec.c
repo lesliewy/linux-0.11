@@ -257,6 +257,13 @@ static unsigned long change_ldt(unsigned long text_size,unsigned long * page)
 // argv - 命令行参数指针数组的指针；
 // envp - 环境变量指针数组的指针。
 // 返回：如果调用成功，则不返回；否则设置出错号，并返回-1.
+/**
+ * 1, 为用户进程的加载做准备
+ * 2, 释放进程的页表
+ *    现在进程要加载自己的程序了，需要解除与父进程的共享关系
+ * 3, 重新设置进程的程序代码段和数据段
+ * 4, 调整进程task_struct
+*/
 int do_execve(unsigned long * eip,long tmp,char * filename,
 	char ** argv, char ** envp)
 {

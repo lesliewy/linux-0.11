@@ -54,6 +54,7 @@ long rd_init(long mem_start, int length)
 	int	i;
 	char	*cp;
 
+	/** 先要将虚拟盘区的请求项处理函数do_rd_request（）与请求项函数控制结构blk_dev[7]的第二项挂接。挂接之后，将虚拟盘所在的内存 区域全部初始化为0 */
 	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
 	rd_start = (char *) mem_start;
 	rd_length = length;

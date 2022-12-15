@@ -21,6 +21,7 @@ SYSSIZE = 0x3000
 ! The loader has been made as simple as possible, and continuos
 ! read errors will result in a unbreakable loop. Reboot by hand. It
 ! loads pretty fast by getting whole sectors at a time whenever possible.
+! 内存规划.
 
 .globl begtext, begdata, begbss, endtext, enddata, endbss
 .text
@@ -31,19 +32,22 @@ begdata:
 begbss:
 .text
 
-SETUPLEN = 4				! nr of setup-sectors
-BOOTSEG  = 0x07c0			! original address of boot-sector
-INITSEG  = 0x9000			! we move boot here - out of the way
-SETUPSEG = 0x9020			! setup starts here
-SYSSEG   = 0x1000			! system loaded at 0x10000 (65536).
-ENDSEG   = SYSSEG + SYSSIZE		! where to stop loading
+SETUPLEN = 4				! nr of setup-sectors   setup程序 的扇区数
+BOOTSEG  = 0x07c0			! original address of boot-sector  启动扇区被BIOS加载的位置
+INITSEG  = 0x9000			! we move boot here - out of the way  启动扇区将要移动到的新位置
+SETUPSEG = 0x9020			! setup starts here  setup程序被加载到的位置
+SYSSEG   = 0x1000			! system loaded at 0x10000 (65536). 内核（kernel）被加载的位置
+ENDSEG   = SYSSEG + SYSSIZE		! where to stop loading  内核的末尾位置
 
 ! ROOT_DEV:	0x000 - same type of floppy as boot.
 !		0x301 - first partition on first drive etc
+! 根文件系统设备号
 ROOT_DEV = 0x306
 
 entry _start
 _start:
+    ! 复制bootsect， 此时CPU的段寄存器（CS）指向0x07C0 （BOOTSEG），即原来bootsect程序所在的位置。
+	！ 开始时bootsect“被迫”加载到0x07C00位置， 现在已将自身移至0x90000处
 	mov	ax,#BOOTSEG
 	mov	ds,ax
 	mov	ax,#INITSEG
@@ -51,19 +55,26 @@ _start:
 	mov	cx,#256
 	sub	si,si
 	sub	di,di
+	! CS值变为 0x9000（INITSEG）
+	! 此前的0x07C00这个位置是根据“两头约定”和“定位识别”而确定的。从现在起，操作系统 已经不需要完全依赖BIOS，可以按照自己的意志 把自己的代码安排在内存中自己想要的位置。
 	rep
 	movw
 	jmpi	go,INITSEG
+	! 因为代码的整体位置发生了变化，所以代码中的各个段也会发生变化。前面已 经改变了CS，现在对DS、ES、SS和SP进行调 整。
+	! 数据段寄存器（DS）、附加段寄存 器（ES）、栈基址寄存器（SS）设置成与代码段 寄存器（CS）相同的位置，并将栈顶指针SP指 向偏移地址为0xFF00处
+	! SS和SP联合使用，就构成了栈数据在内存 中的位置值。
 go:	mov	ax,cs
 	mov	ds,ax
 	mov	es,ax
 ! put stack at 0x9ff00.
 	mov	ss,ax
-	mov	sp,#0xFF00		! arbitrary value >>512
+	mov	sp,#0xFF00		! arbitrary value >>512  	SP（Stack Pointer）：栈顶指针寄存器， 指向栈段的当前栈顶
 
 ! load the setup-sectors directly after the bootblock.
 ! Note that 'es' is already set up.
 
+! 加载setup程序。即加载中断向量表的0x13. 将软盘第二扇区开始的4个扇区，即setup.s 对应的程序加载至内存的SETUPSEG
+！ int 0x19中断向量所指向的启动加载服务程序是BIOS执行的，而int 0x13的中断服务程序是Linux操作系统自身的启动代码bootsect执行的
 load_setup:
 	mov	dx,#0x0000		! drive 0, head 0
 	mov	cx,#0x0002		! sector 2, track 0
@@ -89,7 +100,7 @@ ok_load_setup:
 	mov	ax,#INITSEG
 	mov	es,ax
 
-! Print some inane message
+! Print some inane message  加载system时间比较长，输出信息: “Loading system..."
 
 	mov	ah,#0x03		! read cursor pos
 	xor	bh,bh
@@ -103,16 +114,21 @@ ok_load_setup:
 
 ! ok, we've written the message, now
 ! we want to load the system (at 0x10000)
+! 加载system模块. 扇区数是240个
+! 至此,整个操作系统的代码已全部加载至内存.
 
 	mov	ax,#SYSSEG
 	mov	es,ax		! segment of 0x010000
-	call	read_it
+	call	read_it   ! 调用read_it完成system的加载.
 	call	kill_motor
 
 ! After that we check which root-device to use. If the device is
 ! defined (!= 0), nothing is done and the given device is used.
 ! Otherwise, either /dev/PS0 (2,28) or /dev/at0 (2,8), depending
 ! on the number of sectors that the BIOS reports currently.
+! 确认根设备号.
+! 0.11使用Minix操作系统的文件系统管理方式，要求系统必须存在一个根文件系统，其他文件系统挂接其上，而不是同等地位。
+! 这里的文件系统指的不是操作系统内核中的文件系统代码，而是有配套的文件系统格式的设备，如一张格式化好的软盘。
 
 	seg cs
 	mov	ax,root_dev
@@ -128,13 +144,14 @@ ok_load_setup:
 	je	root_defined
 undef_root:
 	jmp undef_root
-root_defined:
+root_defined:           ！根据前面检测计算机中实际安装的驱动器信 息，确认根设备
 	seg cs
 	mov	root_dev,ax
 
 ! after that (everyting loaded), we jump to
 ! the setup-routine loaded directly after
 ! the bootblock:
+! 跳转至0x90200处，就是前面讲过的第二批程序——setup程序加载的位置。CS：IP指向 setup程序的第一条指令，意味着由setup程序 接着bootsect程序继续执行
 
 	jmpi	0,SETUPSEG
 
@@ -246,7 +263,7 @@ msg1:
 	.ascii "Loading system ..."
 	.byte 13,10,13,10
 
-.org 508
+.org 508                ！注意：508即为0x1FC，当前段是0x9000，所以地 址是0x901FC
 root_dev:
 	.word ROOT_DEV
 boot_flag:
